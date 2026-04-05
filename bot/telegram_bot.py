@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import shlex
 
 import httpx
 from aiogram import Bot, Dispatcher, F
@@ -23,6 +25,8 @@ def _help_text() -> str:
         "/resume <target_role> || <resume_text> || <skill1,skill2>\n"
         "/email <purpose> || <recipient_name> || <context> || <tone>\n"
         "/outreach <to_email> || <recipient_name> || <role> || <company> || <resume_text> || <tone> || <send_now:true|false>\n"
+        "or\n"
+        "/outreach \"to_email\" \"recipient_name\" \"role\" \"company\" \"resume_text\" \"tone\" \"true|false\"\n"
         "/gmail_connect\n"
         "/gmail_status\n"
         "/gmail_disconnect\n"
@@ -168,15 +172,38 @@ async def main() -> None:
 
     @dp.message(Command("outreach"))
     async def outreach_handler(message: Message) -> None:
+        usage_text = (
+            "Usage:\n"
+            "/outreach <to_email> || <recipient_name> || <role> || <company> || "
+            "<resume_text> || <tone> || <send_now:true|false>\n\n"
+            "Example:\n"
+            "/outreach sally@gmail.com || Sally || Intern || Google || "
+            "CS student with Python, FastAPI, Telegram bot projects. || polite || true\n\n"
+            "Alternative (quoted):\n"
+            "/outreach \"sally@gmail.com\" \"Sally\" \"Intern\" \"Google\" "
+            "\"CS student with Python and FastAPI\" \"polite\" \"true\""
+        )
+
         try:
             if not message.from_user:
                 await message.answer("Could not determine Telegram user.")
                 return
 
             raw = (message.text or "").replace("/outreach", "", 1).strip()
-            to_email, recipient_name, role, company, resume_text, tone, send_now = [
-                x.strip() for x in raw.split("||")
-            ]
+            if not raw:
+                raise ValueError("Missing outreach arguments")
+
+            if "||" in raw:
+                parts = [x.strip() for x in raw.split("||")]
+                if len(parts) != 7:
+                    raise ValueError("Invalid outreach argument count")
+                to_email, recipient_name, role, company, resume_text, tone, send_now = parts
+            else:
+                parts = shlex.split(raw)
+                if len(parts) != 7:
+                    raise ValueError("Invalid outreach argument count")
+                to_email, recipient_name, role, company, resume_text, tone, send_now = parts
+
             payload = {
                 "telegram_user_id": message.from_user.id,
                 "to_email": to_email,
@@ -199,11 +226,18 @@ async def main() -> None:
             if connect_url:
                 response_text += f"\n\nConnect Gmail: {connect_url}"
             await message.answer(response_text)
-        except Exception:
-            await message.answer(
-                "Usage: /outreach <to_email> || <recipient_name> || <role> || <company> || "
-                "<resume_text> || <tone> || <send_now:true|false>"
-            )
+        except ValueError:
+            await message.answer(usage_text)
+        except httpx.HTTPStatusError as exc:
+            detail = "Failed to process outreach request."
+            try:
+                body = exc.response.json()
+                detail = body.get("detail", detail)
+            except json.JSONDecodeError:
+                pass
+            await message.answer(f"{detail}\n\nIf needed:\n{usage_text}")
+        except Exception as exc:
+            await message.answer(f"Failed to process outreach request: {exc}\n\nIf needed:\n{usage_text}")
 
     @dp.message(Command("gmail_connect"))
     async def gmail_connect_handler(message: Message) -> None:
@@ -214,6 +248,14 @@ async def main() -> None:
 
             data = await api_get(f"/gmail/connect-link?telegram_user_id={message.from_user.id}")
             await message.answer(f"Connect your Gmail account: {data.get('connect_url')}")
+        except httpx.HTTPStatusError as exc:
+            detail = "Failed to create Gmail connect link."
+            try:
+                body = exc.response.json()
+                detail = body.get("detail", detail)
+            except json.JSONDecodeError:
+                pass
+            await message.answer(f"Failed to create Gmail connect link: {detail}")
         except Exception:
             await message.answer("Failed to create Gmail connect link. Check backend OAuth config.")
 
@@ -229,6 +271,14 @@ async def main() -> None:
                 f"Connected: {data.get('connected')}\n"
                 f"Sender: {data.get('sender_email')}"
             )
+        except httpx.HTTPStatusError as exc:
+            detail = "Failed to check Gmail status."
+            try:
+                body = exc.response.json()
+                detail = body.get("detail", detail)
+            except json.JSONDecodeError:
+                pass
+            await message.answer(detail)
         except Exception:
             await message.answer("Failed to check Gmail status.")
 
@@ -244,6 +294,14 @@ async def main() -> None:
                 f"Connected: {data.get('connected')}\n"
                 "Your Gmail has been disconnected."
             )
+        except httpx.HTTPStatusError as exc:
+            detail = "Failed to disconnect Gmail."
+            try:
+                body = exc.response.json()
+                detail = body.get("detail", detail)
+            except json.JSONDecodeError:
+                pass
+            await message.answer(detail)
         except Exception:
             await message.answer("Failed to disconnect Gmail.")
 

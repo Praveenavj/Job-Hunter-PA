@@ -14,10 +14,14 @@ from app.services.gmail_connection_store import gmail_connection_store
 
 
 class GmailOAuthService:
-    SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
+    SCOPES = [
+        "https://www.googleapis.com/auth/gmail.send",
+        "openid",
+        "email",
+    ]
     AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
     TOKEN_URL = "https://oauth2.googleapis.com/token"
-    PROFILE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
+    USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
 
     def _sign(self, payload_b64: str) -> str:
         digest = hmac.new(
@@ -104,13 +108,18 @@ class GmailOAuthService:
             if not refresh_token:
                 raise ValueError("OAuth token response missing refresh_token.")
 
-            profile_resp = await client.get(
-                self.PROFILE_URL,
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-            profile_resp.raise_for_status()
-            profile_data = profile_resp.json()
-            sender_email = profile_data.get("emailAddress") or current_email or "unknown"
+            sender_email = current_email or "unknown"
+            try:
+                profile_resp = await client.get(
+                    self.USERINFO_URL,
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+                if profile_resp.status_code < 400:
+                    profile_data = profile_resp.json()
+                    sender_email = profile_data.get("email", sender_email)
+            except Exception:
+                # Keep OAuth successful even if user profile lookup is unavailable.
+                pass
 
         gmail_connection_store.upsert_connection(
             telegram_user_id=telegram_user_id,

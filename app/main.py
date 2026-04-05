@@ -40,6 +40,21 @@ def _split_subject_and_body(text: str) -> tuple[str, str]:
     return "Job Application Outreach", text.strip()
 
 
+def _fallback_outreach_draft(recipient_name: str, role: str, company: str, resume_text: str) -> tuple[str, str]:
+    subject = f"Application Interest: {role} role at {company}"
+    body = (
+        f"Hi {recipient_name},\n\n"
+        f"I hope you are doing well. I am reaching out to express my interest in the {role} role at {company}. "
+        "I believe my background is a strong fit for this opportunity.\n\n"
+        "Highlights from my profile:\n"
+        f"{resume_text}\n\n"
+        "I would be grateful for the opportunity to discuss how I can contribute to your team. "
+        "I have attached my resume for your review.\n\n"
+        "Thank you for your time and consideration.\n"
+    )
+    return subject, body
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -66,7 +81,16 @@ async def revise_resume(payload: ResumeReviseRequest) -> LLMResponse:
         "2) Top 5 changes made\n\n"
         f"Resume:\n{payload.current_resume}"
     )
-    text = await openclaw_client.complete(system, user)
+    try:
+        text = await openclaw_client.complete(system, user)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "LLM service is unavailable. Check OPENCLAW_API_URL and make sure the model server is running. "
+                f"({exc})"
+            ),
+        ) from exc
     return LLMResponse(text=text)
 
 
@@ -80,7 +104,16 @@ async def draft_email(payload: DraftEmailRequest) -> LLMResponse:
         f"Context: {payload.context}\n\n"
         "Draft a polished email with a clear subject line and call to action."
     )
-    text = await openclaw_client.complete(system, user)
+    try:
+        text = await openclaw_client.complete(system, user)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "LLM service is unavailable. Check OPENCLAW_API_URL and make sure the model server is running. "
+                f"({exc})"
+            ),
+        ) from exc
     return LLMResponse(text=text)
 
 
@@ -98,8 +131,16 @@ async def draft_outreach_email(payload: OutreachEmailRequest) -> OutreachEmailRe
         "<email body>\n\n"
         f"Resume details:\n{payload.resume_text}"
     )
-    llm_text = await openclaw_client.complete(system, user)
-    subject, body = _split_subject_and_body(llm_text)
+    try:
+        llm_text = await openclaw_client.complete(system, user)
+        subject, body = _split_subject_and_body(llm_text)
+    except Exception:
+        subject, body = _fallback_outreach_draft(
+            recipient_name=payload.recipient_name,
+            role=payload.role,
+            company=payload.company,
+            resume_text=payload.resume_text,
+        )
 
     if not payload.send_now:
         return OutreachEmailResponse(
@@ -204,7 +245,16 @@ async def prepare_interview(payload: InterviewPrepRequest) -> LLMResponse:
         "3) 3 smart questions to ask interviewer\n"
         "4) 24-hour prep timeline"
     )
-    text = await openclaw_client.complete(system, user)
+    try:
+        text = await openclaw_client.complete(system, user)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "LLM service is unavailable. Check OPENCLAW_API_URL and make sure the model server is running. "
+                f"({exc})"
+            ),
+        ) from exc
     return LLMResponse(text=text)
 
 
