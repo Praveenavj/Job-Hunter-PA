@@ -41,3 +41,7 @@ pip-wheel-metadata/
 
 # Notebooks
 .ipynb_checkpoints/
+
+# Local app database
+data/
+*.db

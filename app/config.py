@@ -17,5 +17,11 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     backend_base_url: str = "http://localhost:8000"
 
+    gmail_client_id: str = ""
+    gmail_client_secret: str = ""
+    oauth_redirect_url: str = "http://localhost:8000/oauth/gmail/callback"
+    app_secret_key: str = "change-me-in-production"
+    sqlite_db_path: str = "./data/job_hunter.db"
+
 
 settings = Settings()

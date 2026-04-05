@@ -22,6 +22,17 @@ class DraftEmailRequest(BaseModel):
     tone: str = "professional"
 
 
+class OutreachEmailRequest(BaseModel):
+    telegram_user_id: int
+    to_email: str
+    recipient_name: str
+    role: str
+    company: str
+    resume_text: str
+    tone: str = "professional"
+    send_now: bool = False
+
+
 class InterviewPrepRequest(BaseModel):
     role: str
     company: str
@@ -48,3 +59,25 @@ class JobsResponse(BaseModel):
 class TrackJobResponse(BaseModel):
     message: str
     page_id: Optional[str] = None
+
+
+class OutreachEmailResponse(BaseModel):
+    subject: str
+    body: str
+    sent: bool
+    message_id: Optional[str] = None
+    status: str
+    connect_url: Optional[str] = None
+
+
+class GmailConnectionStatusResponse(BaseModel):
+    connected: bool
+    sender_email: Optional[str] = None
+
+
+class GmailConnectLinkResponse(BaseModel):
+    connect_url: str
+
+
+class GmailDisconnectRequest(BaseModel):
+    telegram_user_id: int
