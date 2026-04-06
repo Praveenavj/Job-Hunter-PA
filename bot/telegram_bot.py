@@ -124,16 +124,15 @@ async def main() -> None:
             )
             return
 
-        lines = [f"Top {len(jobs)} jobs for {role}:"]
+        lines = [f"Top {len(jobs)} jobs for {role}:", ""]
         for idx, job in enumerate(jobs, start=1):
             job_type = job.get('type')
-            details = f"   {job_type}" if job_type else ""
-            lines.append(
-                f"{idx}. {job.get('title')} at {job.get('company')}\n"
-                f"{details}"
-            )
+            entry = f"{idx}. {job.get('title')} at {job.get('company')}"
+            if job_type:
+                entry += f"\n   {job_type}"
+            lines.append(entry)
 
-        await message.answer("\n\n".join(lines), reply_markup=_job_results_keyboard(jobs))
+        await message.answer("\n".join(lines), reply_markup=_job_results_keyboard(jobs))
 
     @dp.message(CommandStart())
     async def start_handler(message: Message) -> None:
@@ -236,7 +235,7 @@ async def main() -> None:
         if step == "role":
             state["role"] = text
             state["step"] = "location"
-            await message.answer("What location do you want? Example: remote, New York, hybrid")
+            await message.answer("What location do you want? Example: Singapore")
             return
 
         if step == "location":
