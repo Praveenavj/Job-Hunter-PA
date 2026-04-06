@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     openclaw_api_key: str = ""
     openclaw_model: str = "openclaw"
 
+    adzuna_app_id: str = ""
+    adzuna_app_key: str = ""
+
     notion_api_key: str = ""
     notion_database_id: str = ""
 

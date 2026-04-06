@@ -8,7 +8,7 @@ import shlex
 import httpx
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
 
 from app.config import settings
 
@@ -17,6 +17,7 @@ PENDING_OUTREACH_BY_USER: dict[int, dict] = {}
 PENDING_OUTREACH_CONFIRMATION_BY_USER: dict[int, dict] = {}
 PENDING_RESUME_CHOICE_BY_USER: dict[int, dict] = {}
 LAST_RESUME_PDF_BY_USER: dict[int, dict] = {}
+JOB_SEARCH_STATE_BY_USER: dict[int, dict] = {}
 
 
 def _help_text() -> str:
@@ -99,6 +100,41 @@ async def main() -> None:
             response_text += f"\n\nConnect Gmail: {connect_url}"
         return response_text
 
+    def _job_results_keyboard(jobs: list[dict]) -> InlineKeyboardMarkup:
+        rows = []
+        for idx, job in enumerate(jobs, start=1):
+            url = job.get("url")
+            title = job.get("title") or f"Job {idx}"
+            company = job.get("company") or "Unknown company"
+            label = f"Open {idx}: {title} at {company}"
+            if url:
+                rows.append([InlineKeyboardButton(text=label, url=url)])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def _show_jobs_results(message: Message, role: str, location: str, limit: int) -> None:
+        payload = {"role": role, "location": location, "limit": limit}
+        data = await api_post("/jobs/search", payload)
+        jobs = data.get("jobs", [])
+
+        if not jobs:
+            await message.answer(
+                f"No jobs found for {role} in {location}.\n\n"
+                "Current source: Remotive, which is mainly a remote-jobs API. "
+                "Try location=remote or a broader location like worldwide/EMEA."
+            )
+            return
+
+        lines = [f"Top {len(jobs)} jobs for {role}:"]
+        for idx, job in enumerate(jobs, start=1):
+            job_type = job.get('type')
+            details = f"   {job_type}" if job_type else ""
+            lines.append(
+                f"{idx}. {job.get('title')} at {job.get('company')}\n"
+                f"{details}"
+            )
+
+        await message.answer("\n\n".join(lines), reply_markup=_job_results_keyboard(jobs))
+
     @dp.message(CommandStart())
     async def start_handler(message: Message) -> None:
         await message.answer("Welcome.\n\n" + _help_text(), reply_markup=_main_menu_keyboard())
@@ -109,7 +145,12 @@ async def main() -> None:
 
     @dp.message(F.text == "1. See jobs available")
     async def menu_jobs(message: Message) -> None:
-        await message.answer("Use: /jobs <role> | <location> | <limit>\nExample: /jobs backend engineer | remote | 5")
+        if not message.from_user:
+            await message.answer("Could not determine Telegram user.")
+            return
+
+        JOB_SEARCH_STATE_BY_USER[message.from_user.id] = {"step": "role"}
+        await message.answer("What role are you searching for?")
 
     @dp.message(F.text == "2. Revise resume")
     async def menu_resume(message: Message) -> None:
@@ -148,6 +189,15 @@ async def main() -> None:
     async def jobs_handler(message: Message) -> None:
         try:
             raw = (message.text or "").replace("/jobs", "", 1).strip()
+            if not raw:
+                if not message.from_user:
+                    await message.answer("Could not determine Telegram user.")
+                    return
+
+                JOB_SEARCH_STATE_BY_USER[message.from_user.id] = {"step": "role"}
+                await message.answer("What role are you searching for?")
+                return
+
             role, location, limit = [x.strip() for x in raw.split("|")]
             payload = {"role": role, "location": location, "limit": int(limit)}
             data = await api_post("/jobs/search", payload)
@@ -167,6 +217,46 @@ async def main() -> None:
             await message.answer("\n\n".join(lines))
         except Exception:
             await message.answer("Usage: /jobs <role> | <location> | <limit>")
+
+    @dp.message(F.text)
+    async def job_search_flow_handler(message: Message) -> None:
+        if not message.from_user:
+            return
+
+        state = JOB_SEARCH_STATE_BY_USER.get(message.from_user.id)
+        if not state:
+            return
+
+        text = (message.text or "").strip()
+        if not text:
+            return
+
+        step = state.get("step")
+
+        if step == "role":
+            state["role"] = text
+            state["step"] = "location"
+            await message.answer("What location do you want? Example: remote, New York, hybrid")
+            return
+
+        if step == "location":
+            state["location"] = text
+            state["step"] = "limit"
+            await message.answer("How many results do you want? Example: 5")
+            return
+
+        if step == "limit":
+            try:
+                limit = max(1, min(20, int(text)))
+            except ValueError:
+                await message.answer("Please enter a number between 1 and 20.")
+                return
+
+            role = state.get("role", "")
+            location = state.get("location", "remote")
+            JOB_SEARCH_STATE_BY_USER.pop(message.from_user.id, None)
+            await _show_jobs_results(message, role, location, limit)
+            return
 
     @dp.message(Command("resume"))
     async def resume_handler(message: Message) -> None:
@@ -426,6 +516,9 @@ async def main() -> None:
 
         user_id = message.from_user.id
         text = (message.text or "").strip().lower()
+
+        if user_id in JOB_SEARCH_STATE_BY_USER:
+            return
 
         pending_choice = PENDING_RESUME_CHOICE_BY_USER.get(user_id)
         if pending_choice:

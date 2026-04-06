@@ -8,19 +8,26 @@ This project provides a Telegram-based personal assistant for job hunting with t
 4. Track job on Notion
 5. Prepare for interviews
 
-It uses:
-- **FastAPI** backend
-- **aiogram** Telegram bot
-- **OpenClaw-compatible Chat Completions API** for AI responses
-- **Notion API** for job application tracking
-- **Gmail API** for optional outreach email sending
+## Tools and APIs used
+
+- **FastAPI** — backend API server
+- **aiogram** — Telegram bot framework
+- **OpenClaw-compatible Chat Completions API** — LLM responses for resume, email, and interview help
+- **Notion API** — job application tracking
+- **Gmail API** — optional outreach sending after user OAuth approval
+- **Google OAuth 2.0** — user Gmail connection flow
+- **Remotive API** — remote job search source
+- **Jobicy API** — Singapore and remote job search source
+- **Adzuna API** — Singapore job search source
 
 ## Project Structure
 
 - `app/main.py` — FastAPI endpoints
 - `app/services/openclaw_client.py` — OpenClaw API integration
-- `app/services/job_service.py` — job search integration (Remotive API)
+- `app/services/job_service.py` — job search integration (Remotive, Jobicy, Adzuna)
 - `app/services/notion_service.py` — Notion tracking
+- `app/services/gmail_oauth_service.py` — Gmail OAuth connect/disconnect/status
+- `app/services/gmail_service.py` — Gmail API sending
 - `bot/telegram_bot.py` — Telegram bot commands and messaging
 
 ## 1) Setup
@@ -39,6 +46,7 @@ Update `.env` with your values:
 - `OPENCLAW_API_URL` (OpenClaw endpoint)
 - `OPENCLAW_API_KEY` (if needed)
 - `OPENCLAW_MODEL`
+- `ADZUNA_APP_ID` and `ADZUNA_APP_KEY` (for Singapore jobs)
 - `NOTION_API_KEY` and `NOTION_DATABASE_ID` (for `/track`)
 - `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET` (for Gmail OAuth)
 - `OAUTH_REDIRECT_URL` (must match Google Cloud OAuth redirect URI)
@@ -83,6 +91,12 @@ The bot now shows a menu-style keyboard:
 5. Prepare for interviews
 
 Option 3 uses an LLM to generate outreach emails and can optionally send them via Gmail API.
+
+## Job search sources
+
+- **Remote jobs**: Remotive
+- **Singapore jobs**: Adzuna first, then Jobicy as fallback
+- Search results show the source label and clickable buttons in Telegram
 
 ## Multi-user Gmail OAuth flow (recommended)
 
