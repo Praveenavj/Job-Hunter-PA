@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Optional
 
 from notion_client import AsyncClient
@@ -24,10 +25,15 @@ class NotionService:
 
         client = AsyncClient(auth=settings.notion_api_key)
 
+        today = date.today()
+        followup = today + timedelta(days=7)
+
         properties = {
             "Company": {"title": [{"text": {"content": company}}]},
             "Role": {"rich_text": [{"text": {"content": role}}]},
             "Status": {"select": {"name": status}},
+            "Applied Date": {"date": {"start": str(today)}},
+            "Follow-up Date": {"date": {"start": str(followup)}},
         }
 
         if link:
@@ -40,7 +46,32 @@ class NotionService:
             parent={"database_id": settings.notion_database_id},
             properties=properties,
         )
-        return "Job tracked successfully in Notion.", response.get("id")
+        return (
+            f"Job tracked! Follow-up reminder set for {followup}.",
+            response.get("id"),
+        )
+
+    async def get_summary(self) -> list[dict]:
+        if not settings.notion_api_key or not settings.notion_database_id:
+            return []
+
+        client = AsyncClient(auth=settings.notion_api_key)
+        results = await client.databases.query(database_id=settings.notion_database_id)
+
+        apps = []
+        for page in results.get("results", []):
+            props = page.get("properties", {})
+            company_prop = props.get("Company", {}).get("title", [])
+            role_prop = props.get("Role", {}).get("rich_text", [])
+            status_prop = props.get("Status", {}).get("select")
+            followup_prop = props.get("Follow-up Date", {}).get("date")
+            apps.append({
+                "company": company_prop[0]["plain_text"] if company_prop else "",
+                "role": role_prop[0]["plain_text"] if role_prop else "",
+                "status": status_prop["name"] if status_prop else "Unknown",
+                "followup": followup_prop["start"] if followup_prop else None,
+            })
+        return apps
 
 
 notion_service = NotionService()

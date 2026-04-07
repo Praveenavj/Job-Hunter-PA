@@ -84,3 +84,13 @@ class GmailConnectLinkResponse(BaseModel):
 
 class GmailDisconnectRequest(BaseModel):
     telegram_user_id: int
+
+class ResumeTailorRequest(BaseModel):
+    job_description: str
+    resume_text: str
+    job_title: str = ""
+    company: str = ""
+
+class NotionSummaryResponse(BaseModel):
+    applications: list[dict[str, Any]]
+    total: int

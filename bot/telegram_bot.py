@@ -40,8 +40,9 @@ def _help_text() -> str:
         "/track <company> || <role> || <status> || <link> || <notes>\n"
         "/interview <role> || <company> || <focus1,focus2>\n"
         "/help"
+        "/tailor <job_title> || <company> || <job_description> || <resume_text>\n"
+        "/status\n"
     )
-
 
 def _main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -154,9 +155,12 @@ async def main() -> None:
     @dp.message(F.text == "2. Revise resume")
     async def menu_resume(message: Message) -> None:
         await message.answer(
-            "Use: /resume <target_role> || <resume_text> || <skill1,skill2>\n"
-            "Example: /resume Data Analyst || I have 2 years in BI... || SQL,Python,Tableau"
+            "Please upload your resume as a PDF file.\n\n"
+            "I will read it and ask you what role you're targeting."
         )
+        # Set state so the next PDF upload is handled as a resume revision
+        if message.from_user:
+            PENDING_RESUME_CHOICE_BY_USER[message.from_user.id] = {"mode": "revise"}
 
     @dp.message(F.text == "3. Draft email")
     async def menu_email(message: Message) -> None:
@@ -374,7 +378,6 @@ async def main() -> None:
         if not message.from_user:
             return
 
-        pending = PENDING_OUTREACH_BY_USER.get(message.from_user.id)
         document = message.document
         if not document:
             return
@@ -390,13 +393,32 @@ async def main() -> None:
             downloaded = await bot.download_file(telegram_file.file_path)
             resume_bytes = downloaded.read()
 
+            # Always save as the latest uploaded resume
             LAST_RESUME_PDF_BY_USER[message.from_user.id] = {
                 "filename": document.file_name or "resume.pdf",
                 "bytes": resume_bytes,
             }
 
+            # Check if this upload was triggered by "2. Revise resume" menu
+            pending_choice = PENDING_RESUME_CHOICE_BY_USER.get(message.from_user.id, {})
+            if pending_choice.get("mode") == "revise":
+                PENDING_RESUME_CHOICE_BY_USER.pop(message.from_user.id, None)
+                await message.answer(
+                    "Got your resume! Now tell me:\n\n"
+                    "What role are you targeting? Also share the job description if you have one.\n\n"
+                    "Use: /resume <target_role> || <resume_text> || <skill1,skill2>\n\n"
+                    "Or for JD-aware tailoring:\n"
+                    "/tailor <job_title> || <company> || <job_description> || <resume_text>"
+                )
+                return
+
+            # Otherwise handle as outreach PDF
+            pending = PENDING_OUTREACH_BY_USER.get(message.from_user.id)
             if not pending:
-                await message.answer("Resume PDF saved. I can reuse this for your next outreach send.")
+                await message.answer(
+                    "Resume PDF saved. I'll use this automatically for your next outreach.\n\n"
+                    "You can now run /outreach to send a job application email."
+                )
                 return
 
             response_text = await _send_outreach_with_resume(
@@ -406,6 +428,7 @@ async def main() -> None:
             )
             await message.answer(response_text)
             PENDING_OUTREACH_BY_USER.pop(message.from_user.id, None)
+
         except Exception as exc:
             await message.answer(f"Failed to process uploaded PDF: {exc}")
 
@@ -491,6 +514,84 @@ async def main() -> None:
             await message.answer(f"{data.get('message')} Page ID: {data.get('page_id')}")
         except Exception:
             await message.answer("Usage: /track <company> || <role> || <status> || <link> || <notes>")
+
+    @dp.message(Command("tailor"))
+    async def tailor_handler(message: Message) -> None:
+        usage = (
+            "Usage: /tailor <job_title> || <company> || <job_description> || <resume_text>\n\n"
+            "Example:\n"
+            "/tailor Data Analyst || Google || We need SQL and Python skills... || "
+            "I built dashboards using Tableau..."
+        )
+        try:
+            raw = (message.text or "").replace("/tailor", "", 1).strip()
+            parts = [x.strip() for x in raw.split("||")]
+            if len(parts) != 4:
+                raise ValueError("Wrong number of arguments")
+            job_title, company, job_description, resume_text = parts
+            payload = {
+                "job_title": job_title,
+                "company": company,
+                "job_description": job_description,
+                "resume_text": resume_text,
+            }
+            await message.answer("Tailoring your resume... this may take 20-30 seconds.")
+            data = await api_post("/resume/tailor", payload)
+            raw_text = data.get("text", "{}")
+
+            import json, re
+            clean = re.sub(r"```json|```", "", raw_text).strip()
+            parsed = json.loads(clean)
+
+            score = parsed.get("match_score", "N/A")
+            keywords = ", ".join(parsed.get("keywords_added", []))
+            bullets = parsed.get("rewritten_bullets", [])
+
+            lines = [f"Match score: {score}%", f"Keywords added: {keywords}", ""]
+            for i, b in enumerate(bullets, 1):
+                lines.append(f"{i}. BEFORE: {b.get('original', '')}")
+                lines.append(f"   AFTER:  {b.get('improved', '')}")
+                lines.append(f"   WHY:    {b.get('reason', '')}")
+                lines.append("")
+
+            await message.answer("\n".join(lines))
+        except (ValueError, KeyError):
+            await message.answer(usage)
+        except Exception as exc:
+            await message.answer(f"Failed to tailor resume: {exc}\n\n{usage}")
+
+    @dp.message(Command("status"))
+    async def status_handler(message: Message) -> None:
+        try:
+            data = await api_get("/notion/summary")
+            apps = data.get("applications", [])
+            total = data.get("total", 0)
+
+            if not apps:
+                await message.answer("No applications tracked yet. Use /track to add one.")
+                return
+
+            today = __import__("datetime").date.today()
+            lines = [f"Your {total} tracked application(s):\n"]
+            for app in apps:
+                followup = app.get("followup")
+                days_left = ""
+                if followup:
+                    delta = (__import__("datetime").date.fromisoformat(followup) - today).days
+                    if delta < 0:
+                        days_left = f" — OVERDUE by {abs(delta)}d"
+                    elif delta == 0:
+                        days_left = " — follow up TODAY"
+                    else:
+                        days_left = f" — follow up in {delta}d"
+                lines.append(
+                    f"{app.get('company')} | {app.get('role')} | "
+                    f"{app.get('status')}{days_left}"
+                )
+
+            await message.answer("\n".join(lines))
+        except Exception as exc:
+            await message.answer(f"Failed to fetch summary: {exc}")
 
     @dp.message(Command("interview"))
     async def interview_handler(message: Message) -> None:

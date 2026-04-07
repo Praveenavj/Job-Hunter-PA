@@ -20,6 +20,8 @@ from app.schemas import (
     ResumeReviseRequest,
     TrackJobRequest,
     TrackJobResponse,
+    NotionSummaryResponse,      
+    ResumeTailorRequest, 
 )
 from app.services.gmail_oauth_service import gmail_oauth_service
 from app.services.gmail_service import gmail_service
@@ -326,3 +328,43 @@ async def track_job(payload: TrackJobRequest) -> TrackJobResponse:
         return TrackJobResponse(message=message, page_id=page_id)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to track job: {exc}") from exc
+    
+@app.post("/resume/tailor", response_model=LLMResponse)
+async def tailor_resume(payload: ResumeTailorRequest) -> LLMResponse:
+    system = (
+        "You are an expert resume writer helping a candidate land their target job. "
+        "Return ONLY valid JSON — no markdown fences, no preamble."
+    )
+    user = (
+        f"Job title: {payload.job_title}\n"
+        f"Company: {payload.company}\n\n"
+        f"Job description:\n{payload.job_description}\n\n"
+        f"Candidate resume:\n{payload.resume_text}\n\n"
+        "Rewrite the experience and project bullet points so they:\n"
+        "1. Use keywords from the job description naturally\n"
+        "2. Quantify achievements where the resume already mentions them\n"
+        "3. Lead with strong action verbs matching the JD language\n"
+        "4. NEVER invent experience or skills not in the original resume\n\n"
+        'Return JSON only:\n'
+        '{\n'
+        '  "rewritten_bullets": [\n'
+        '    {"original": "old bullet", "improved": "new bullet", "reason": "why better"}\n'
+        '  ],\n'
+        '  "keywords_added": ["keyword1", "keyword2"],\n'
+        '  "match_score": 85\n'
+        '}'
+    )
+    try:
+        text = await openclaw_client.complete(system, user)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"LLM unavailable: {exc}") from exc
+    return LLMResponse(text=text)
+
+
+@app.get("/notion/summary", response_model=NotionSummaryResponse)
+async def get_notion_summary() -> NotionSummaryResponse:
+    try:
+        apps = await notion_service.get_summary()
+        return NotionSummaryResponse(applications=apps, total=len(apps))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch summary: {exc}") from exc
