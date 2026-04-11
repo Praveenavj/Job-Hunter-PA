@@ -1,18 +1,21 @@
 """
-Job Hunter PA – Telegram Bot 
+Job Hunter PA – Telegram Bot v3 (Complete, all bugs fixed)
 
 Features:
-  1. Multi-source job search (5 sources, dedup, ranking, inline selection)
-  2. Daily 9 AM digest + follow-up reminders via APScheduler
-  3. Resume upload (PDF) → stored master resume, never re-upload
+  1. Multi-source job search (6 sources: MCF, Adzuna, Indeed, Careers@Gov, Jora, Jobicy)
+  2. Daily 9 AM digest + follow-up reminders (APScheduler)
+  3. Resume upload (PDF) with 3-method extraction → stored master resume
   4. Resume revision with AI scoring and ATS tips
-  5. Resume tailoring with keyword gap analysis before LLM call
+  5. Resume tailoring with keyword gap analysis
   6. Email drafting (general / follow-up / thank-you)
   7. Cold outreach drafting + Gmail send with PDF attachment
   8. Application tracker → colour-coded Excel export
-  9. Interview prep guide (company brief + questions + 24h plan)
-  10. Live mock interview (5 Q&A with AI feedback per answer)
-  11. STAR story bank (save, view, use in interview prep)
+  9. Tabular /myapps with monospace table + status icons
+  10. Interview prep guide (company brief + questions + 24h plan)
+  11. Live mock interview (5 Q&A with AI feedback)
+  12. STAR story bank (save, view, use in prep)
+  13. /testalert – test notifications immediately without waiting for 9 AM
+  14. /remindme – set a custom reminder at any time
 """
 from __future__ import annotations
 
@@ -26,7 +29,8 @@ import httpx
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
-    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
+    BufferedInputFile, CallbackQuery,
+    InlineKeyboardButton, InlineKeyboardMarkup,
     KeyboardButton, Message, ReplyKeyboardMarkup,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -35,20 +39,22 @@ from app import database as db
 from app.config import settings
 from app.resume_utils import extract_keywords, extract_text_from_pdf
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 BACKEND = settings.backend_base_url.rstrip("/")
 
-# ── Conversation state (in-memory, per user) ──────────────────────────────────
-STATE:    dict[int, dict] = {}   # { uid: { "step": ..., ...data } }
-PDF_STORE: dict[int, bytes] = {} # { uid: raw_pdf_bytes }
-JOBS_CACHE: dict[int, list] = {} # { uid: [job dicts from last search] }
-PRACTICE:  dict[int, dict] = {}  # { uid: { role, company, question, count } }
+# ── In-memory conversation state ─────────────────────────────────────────────
+STATE:     dict[int, dict] = {}   # { uid: { "step": ..., ...data } }
+PDF_STORE: dict[int, bytes] = {}  # { uid: raw_pdf_bytes }
+JOBS_CACHE: dict[int, list] = {}  # { uid: [job dicts from last search] }
+PRACTICE:  dict[int, dict] = {}   # { uid: { role, company, question, count } }
 
 
-# ── Keyboards ──────────────────────────────────────────────────────────────────
+# ── Keyboards ─────────────────────────────────────────────────────────────────
 
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -71,7 +77,7 @@ def yn_kb(yes_cb: str, no_cb: str) -> InlineKeyboardMarkup:
     ]])
 
 
-# ── HTTP helpers ───────────────────────────────────────────────────────────────
+# ── HTTP helpers ──────────────────────────────────────────────────────────────
 
 async def api_post(path: str, payload: dict) -> dict:
     async with httpx.AsyncClient(timeout=90) as c:
@@ -94,16 +100,16 @@ async def api_bytes(path: str) -> bytes:
         return r.content
 
 
-# ── Telegram message helpers ───────────────────────────────────────────────────
+# ── Message helpers ───────────────────────────────────────────────────────────
 
 async def send_long(msg: Message, text: str, pm: str = "Markdown") -> None:
-    """Send text split into <=3900-char chunks."""
+    """Send text split into ≤3900-char chunks to avoid Telegram 4096 limit."""
     for i in range(0, len(text), 3900):
         chunk = text[i: i + 3900]
         try:
             await msg.answer(chunk, parse_mode=pm)
         except Exception:
-            await msg.answer(chunk)
+            await msg.answer(chunk)  # retry without parse_mode if formatting fails
 
 
 def fmt_jobs(jobs: list[dict]) -> str:
@@ -123,10 +129,10 @@ def fmt_jobs(jobs: list[dict]) -> str:
     return "\n".join(lines)
 
 
-# ── Module-level tailor runner (avoids inner-function scoping issues) ──────────
+# ── Module-level tailor helper (avoids inner-function closure issues) ─────────
 
 async def _run_tailor(msg: Message, uid: int) -> None:
-    """Read tailor params from STATE, call backend, display result, clean up."""
+    """Call /resume/tailor with STATE data, show result, clean up."""
     state = STATE.get(uid, {})
     try:
         result = await api_post("/resume/tailor", {
@@ -142,10 +148,10 @@ async def _run_tailor(msg: Message, uid: int) -> None:
     await msg.answer("Done! Back to main menu 👇", reply_markup=main_menu())
 
 
-# ── Scheduler tasks ────────────────────────────────────────────────────────────
+# ── Scheduler tasks ───────────────────────────────────────────────────────────
 
 async def daily_digest(bot: Bot) -> None:
-    """9 AM – push new jobs to every user with saved searches."""
+    """9 AM SGT – push new jobs to every user with saved searches."""
     logger.info("Running daily digest...")
     for uid in db.get_all_active_users():
         try:
@@ -177,11 +183,11 @@ async def daily_digest(bot: Bot) -> None:
                     parse_mode="Markdown",
                 )
         except Exception as e:
-            logger.error(f"Digest error uid={uid}: {e}")
+            logger.error(f"Digest uid={uid}: {e}")
 
 
 async def followup_check(bot: Bot) -> None:
-    """9:05 AM – remind users about overdue follow-ups."""
+    """9:05 AM SGT – remind users about overdue follow-ups."""
     for uid in db.get_all_active_users():
         try:
             for app in db.get_followup_due(uid):
@@ -198,9 +204,9 @@ async def followup_check(bot: Bot) -> None:
             logger.error(f"Reminder uid={uid}: {e}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════
 # MAIN
-# ══════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════
 
 async def main() -> None:
     if not settings.telegram_bot_token:
@@ -209,19 +215,21 @@ async def main() -> None:
     bot = Bot(token=settings.telegram_bot_token)
     dp  = Dispatcher()
 
-    # ── Scheduler ──────────────────────────────────────────────────────────────
+    # ── Scheduler ─────────────────────────────────────────────────────────────
     scheduler = AsyncIOScheduler(timezone=settings.daily_digest_timezone)
     scheduler.add_job(daily_digest,   "cron",
-                      hour=settings.daily_digest_hour, minute=0,  args=[bot])
+                      hour=settings.daily_digest_hour, minute=0, args=[bot])
     scheduler.add_job(followup_check, "cron",
-                      hour=settings.daily_digest_hour, minute=5,  args=[bot])
+                      hour=settings.daily_digest_hour, minute=5, args=[bot])
     scheduler.start()
-    logger.info(f"Scheduler ready – digest at {settings.daily_digest_hour}:00 "
-                f"{settings.daily_digest_timezone}")
+    logger.info(
+        f"Scheduler ready – digest at {settings.daily_digest_hour}:00 "
+        f"{settings.daily_digest_timezone}"
+    )
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # COMMANDS
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
+    # BASIC COMMANDS
+    # ═════════════════════════════════════════════════════════════════════════
 
     @dp.message(CommandStart())
     async def cmd_start(msg: Message) -> None:
@@ -230,8 +238,8 @@ async def main() -> None:
         STATE.pop(uid, None)
         await msg.answer(
             "👋 *Welcome to Job Hunter PA!*\n\n"
-            "I search jobs from *5 sources*, tailor your resume with keyword analysis, "
-            "prep interviews, track applications, and send outreach emails — all here.\n\n"
+            "I search jobs from *6 sources*, tailor your resume with keyword analysis, "
+            "prep interviews, track applications, and send outreach emails.\n\n"
             "Choose an option 👇",
             parse_mode="Markdown",
             reply_markup=main_menu(),
@@ -242,7 +250,7 @@ async def main() -> None:
         await msg.answer(
             "*📋 All Commands*\n\n"
             "*🔍 Jobs*\n"
-            "/jobs – search jobs (5 sources)\n"
+            "/jobs – search jobs (6 sources)\n"
             "/digest – save search for daily 9 AM digest\n\n"
             "*📄 Resume*\n"
             "/resume – upload PDF & revise with AI\n"
@@ -255,7 +263,7 @@ async def main() -> None:
             "/gmail\\_disconnect – unlink Gmail\n\n"
             "*📊 Applications*\n"
             "/track – add application manually\n"
-            "/myapps – view your pipeline summary\n"
+            "/myapps – view pipeline (tabular)\n"
             "/update ID STATUS – e.g. /update 3 Interviewed\n"
             "/export – download colour-coded Excel tracker\n\n"
             "*🎤 Interview*\n"
@@ -264,6 +272,9 @@ async def main() -> None:
             "*⭐ STAR Stories*\n"
             "/addstar – save a STAR story for interviews\n"
             "/mystars – list all saved stories\n\n"
+            "*🔔 Notifications*\n"
+            "/testalert – test digest + reminders right now\n"
+            "/remindme – set a custom reminder\n\n"
             "/stop – cancel current action\n"
             "/status – check backend health\n",
             parse_mode="Markdown",
@@ -283,9 +294,9 @@ async def main() -> None:
         PRACTICE.pop(msg.from_user.id, None)
         await msg.answer("✋ Cancelled. Back to main menu.", reply_markup=main_menu())
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # 1. JOB SEARCH
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
 
     @dp.message(F.text == "1. See jobs available")
     @dp.message(Command("jobs"))
@@ -302,19 +313,18 @@ async def main() -> None:
         STATE[msg.from_user.id] = {"step": "digest_role"}
         await msg.answer(
             "📬 *Save Daily Search*\n\n"
-            "What role should I search every morning?\n"
-            "_I'll push only NEW jobs at 9 AM Singapore time._",
+            "What role should I search every morning at 9 AM?",
             parse_mode="Markdown",
         )
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # 2. RESUME
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
 
     @dp.message(F.text == "2. Revise resume")
     @dp.message(Command("resume"))
     async def start_resume(msg: Message) -> None:
-        uid     = msg.from_user.id
+        uid = msg.from_user.id
         existing = db.get_master_resume(uid)
         if existing:
             STATE[uid] = {"step": "resume_have_existing"}
@@ -330,20 +340,22 @@ async def main() -> None:
         else:
             STATE[uid] = {"step": "resume_await_pdf"}
             await msg.answer(
-                "📄 *Upload your resume*\n\nSend me your resume as a *PDF file*.",
+                "📄 *Upload your resume*\n\n"
+                "Send me your resume as a *PDF file*.\n\n"
+                "_Tip: If PDF fails, you can also paste your resume as plain text._",
                 parse_mode="Markdown",
             )
 
     @dp.message(Command("tailor"))
     async def cmd_tailor(msg: Message) -> None:
-        uid    = msg.from_user.id
+        uid = msg.from_user.id
         resume = db.get_master_resume(uid)
         if resume:
             STATE[uid] = {"step": "tailor_jd", "resume_text": resume}
             await msg.answer(
                 "🎯 *Resume Tailor*\n\n"
                 "✅ Using your stored resume.\n\n"
-                "Paste the *full job description* (copy everything from the posting):",
+                "Now paste the *full job description* (copy everything from the posting):",
                 parse_mode="Markdown",
             )
         else:
@@ -353,9 +365,9 @@ async def main() -> None:
                 parse_mode="Markdown",
             )
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # 3. EMAIL
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
 
     @dp.message(F.text == "3. Draft email")
     @dp.message(Command("email"))
@@ -379,14 +391,14 @@ async def main() -> None:
         await msg.answer(
             "📨 *Cold Outreach*\n\n"
             "Send one line:\n"
-            "`to@email.com || Recipient Name || Role || Company`\n\n"
+            "`email || Name || Role || Company`\n\n"
             "Example:\n`hr@google.com || Sarah Tan || Data Analyst || Google`",
             parse_mode="Markdown",
         )
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # 4. TRACK
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
 
     @dp.message(F.text == "4. Track application")
     @dp.message(Command("track"))
@@ -404,30 +416,47 @@ async def main() -> None:
             if not apps:
                 await msg.answer(
                     "📊 No applications tracked yet.\n\n"
-                    "Use '4. Track application' to add one."
+                    "Use '4. Track application' or tap a job → Track application."
                 )
                 return
+
             from collections import Counter
             counts = Counter(a["status"] for a in apps)
             icons  = {"Applied": "📤", "Interviewed": "🎤", "Offered": "🎉",
                       "Rejected": "❌", "Withdrawn": "↩️"}
-            lines  = [f"📊 *Your Pipeline ({len(apps)} total)*\n"]
-            for status, n in sorted(counts.items()):
-                lines.append(f"{icons.get(status, '•')} {status}: {n}")
-            lines.append("\n*Last 5:*")
-            for a in apps[:5]:
-                fd     = a.get("followup_date", "")
+
+            # Summary line
+            summary_parts = [f"{icons.get(s,'•')}{s[:3]}:{n}"
+                             for s, n in sorted(counts.items())]
+            header = (f"📊 *Your Pipeline ({len(apps)} total)*\n"
+                      + "  ".join(summary_parts))
+
+            # Monospace table
+            today = date.today()
+            table  = ["```"]
+            table.append(f"{'#':<3} {'Company':<16} {'Role':<14} {'Status':<11} {'Applied'}")
+            table.append("─" * 57)
+            for i, a in enumerate(apps[:20], 1):
+                co     = (a.get("company","")[:15]).ljust(16)
+                role   = (a.get("role","")[:13]).ljust(14)
+                status = (a.get("status","")[:10]).ljust(11)
+                adate  = (a.get("applied_date","")[:10])
                 flag   = ""
-                if fd and a["status"] == "Applied":
-                    delta = (date.fromisoformat(fd) - date.today()).days
-                    flag  = (" ⚠️ overdue" if delta < 0 else
-                             " ⏰ today"   if delta == 0 else "")
-                lines.append(
-                    f"• *{a['company']}* – {a['role']} "
-                    f"[{a['status']}] {a.get('applied_date','')}{flag}"
-                )
-            lines.append("\n_/export → Excel tracker_")
-            await msg.answer("\n".join(lines), parse_mode="Markdown")
+                fd = a.get("followup_date","")
+                if fd and a.get("status") == "Applied":
+                    delta = (date.fromisoformat(fd) - today).days
+                    flag  = " ⚠" if delta < 0 else (" ⏰" if delta == 0 else "")
+                table.append(f"{i:<3} {co} {role} {status} {adate}{flag}")
+            table.append("```")
+
+            footer = []
+            if len(apps) > 20:
+                footer.append(f"_Showing 20 of {len(apps)} — use /export for all_")
+            footer.append("_/update ID STATUS  ·  /export for Excel_")
+
+            full = header + "\n\n" + "\n".join(table) + "\n" + "\n".join(footer)
+            await msg.answer(full, parse_mode="Markdown")
+
         except Exception as e:
             await msg.answer(f"❌ Error: {e}")
 
@@ -435,14 +464,20 @@ async def main() -> None:
     async def cmd_update(msg: Message) -> None:
         parts = (msg.text or "").replace("/update", "").strip().split(None, 1)
         if len(parts) < 2 or not parts[0].isdigit():
-            await msg.answer("Usage: `/update APP_ID STATUS`\nExample: `/update 3 Interviewed`",
-                             parse_mode="Markdown")
+            await msg.answer(
+                "Usage: `/update APP_ID STATUS`\n"
+                "Example: `/update 3 Interviewed`\n\n"
+                "Valid statuses: Applied, Interviewed, Offered, Rejected, Withdrawn",
+                parse_mode="Markdown",
+            )
             return
         try:
             await api_post(f"/applications/update/{parts[0]}",
                            {"status": parts[1].strip().capitalize()})
-            await msg.answer(f"✅ Application #{parts[0]} → *{parts[1].strip().capitalize()}*",
-                             parse_mode="Markdown")
+            await msg.answer(
+                f"✅ Application #{parts[0]} → *{parts[1].strip().capitalize()}*",
+                parse_mode="Markdown",
+            )
         except Exception as e:
             await msg.answer(f"❌ Error: {e}")
 
@@ -452,7 +487,7 @@ async def main() -> None:
         try:
             xlsx = await api_bytes(f"/applications/export/{msg.from_user.id}")
             await msg.answer_document(
-                document=("job_applications.xlsx", xlsx),
+                document=BufferedInputFile(xlsx, filename="job_applications.xlsx"),
                 caption=(
                     "📊 *Job Application Tracker*\n\n"
                     "• Sheet 1 – Applications (colour-coded by status)\n"
@@ -464,9 +499,9 @@ async def main() -> None:
         except Exception as e:
             await msg.answer(f"❌ Export failed: {e}")
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # 5. INTERVIEW
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
 
     @dp.message(F.text == "5. Prepare for interviews")
     @dp.message(Command("interview"))
@@ -486,16 +521,16 @@ async def main() -> None:
             parse_mode="Markdown",
         )
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # STAR STORIES
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
 
     @dp.message(Command("addstar"))
     async def cmd_addstar(msg: Message) -> None:
         STATE[msg.from_user.id] = {"step": "star_title"}
         await msg.answer(
             "⭐ *Add STAR Story*\n\n"
-            "Saved stories are surfaced during interview prep.\n\n"
+            "STAR stories are surfaced during interview prep.\n\n"
             "Give this story a short title:\n"
             "_e.g. 'Led RFM analysis at Science Centre'_",
             parse_mode="Markdown",
@@ -506,21 +541,109 @@ async def main() -> None:
         uid     = msg.from_user.id
         stories = db.get_star_stories(uid)
         if not stories:
-            await msg.answer("⭐ No STAR stories yet. Use /addstar to add one.")
+            await msg.answer(
+                "⭐ No STAR stories yet.\n\nUse /addstar to add your first one."
+            )
             return
         lines = [f"⭐ *Your STAR Stories ({len(stories)})*\n"]
         for i, s in enumerate(stories, 1):
             lines.append(
                 f"*{i}. {s['title']}*\n"
                 f"   🏷️ {s.get('themes','')}\n"
-                f"   📈 {(s.get('result') or '')[:80]}...\n"
+                f"   📈 _{(s.get('result') or '')[:80]}..._\n"
             )
         lines.append("_/addstar to add more_")
         await send_long(msg, "\n".join(lines))
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
+    # NOTIFICATIONS
+    # ═════════════════════════════════════════════════════════════════════════
+
+    @dp.message(Command("testalert"))
+    async def cmd_testalert(msg: Message) -> None:
+        """Test both digest and follow-up immediately without waiting for 9 AM."""
+        uid = msg.from_user.id
+        await msg.answer(
+            "🧪 *Testing notifications now...*\n\n"
+            "Running digest + follow-up check for your account.",
+            parse_mode="Markdown",
+        )
+
+        # ── Digest test ───────────────────────────────────────────────────
+        searches = db.get_saved_searches(uid)
+        if not searches:
+            await msg.answer(
+                "⚠️ *Digest:* No saved searches yet.\n\n"
+                "Use /digest to save a search, then /testalert again.\n\n"
+                "_Example: /digest → 'Data Analyst' → 'Singapore'_",
+                parse_mode="Markdown",
+            )
+        else:
+            new_jobs: list[dict] = []
+            for s in searches:
+                try:
+                    data = await api_post("/jobs/search", {
+                        "role":        s["role"],
+                        "location":    s["location"],
+                        "limit":       3,
+                        "telegram_id": uid,
+                        "new_only":    True,
+                    })
+                    new_jobs.extend(data.get("jobs", []))
+                except Exception as e:
+                    logger.warning(f"testalert search error: {e}")
+
+            if new_jobs:
+                await msg.answer(
+                    f"✅ *Digest test – {len(new_jobs)} new job(s) found:*\n\n"
+                    + fmt_jobs(new_jobs[:5]),
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                )
+            else:
+                await msg.answer(
+                    "✅ *Digest test:* No new jobs right now.\n\n"
+                    "_All matching jobs have already been shown to you. "
+                    "Try searching a new role with /digest to see fresh results._",
+                    parse_mode="Markdown",
+                )
+
+        # ── Follow-up test ────────────────────────────────────────────────
+        due = db.get_followup_due(uid)
+        if due:
+            await msg.answer(
+                f"⏰ *Follow-up test – {len(due)} overdue:*",
+                parse_mode="Markdown",
+            )
+            for app in due:
+                await msg.answer(
+                    f"⏰ *Follow-up due!*\n"
+                    f"🏢 *{app['company']}* – {app['role']}\n"
+                    f"📅 Applied: {app['applied_date']}\n"
+                    f"Use `/update {app['id']} Interviewed` to update.",
+                    parse_mode="Markdown",
+                )
+        else:
+            await msg.answer(
+                f"✅ *Follow-up test:* No overdue follow-ups.\n\n"
+                f"_Reminders fire {settings.followup_reminder_days} days after applying "
+                f"if status is still 'Applied'._",
+                parse_mode="Markdown",
+            )
+
+    @dp.message(Command("remindme"))
+    async def cmd_remindme(msg: Message) -> None:
+        STATE[msg.from_user.id] = {"step": "remindme_text"}
+        await msg.answer(
+            "🔔 *Custom Reminder*\n\n"
+            "What should I remind you about?\n"
+            "_e.g. Follow up with Grab recruiter_",
+            parse_mode="Markdown",
+        )
+
+    # ═════════════════════════════════════════════════════════════════════════
     # GMAIL
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
 
     @dp.message(Command("gmail_connect"))
     async def cmd_gmail_connect(msg: Message) -> None:
@@ -528,8 +651,8 @@ async def main() -> None:
             data = await api_get(f"/gmail/connect-link?telegram_id={msg.from_user.id}")
             await msg.answer(
                 f"🔗 [Tap here to connect Gmail]({data['connect_url']})\n\n"
-                "_After approving, return to Telegram. "
-                "I'll send emails on your behalf._",
+                "_After approving in the browser, return to Telegram. "
+                "I'll send outreach emails on your behalf._",
                 parse_mode="Markdown",
             )
         except Exception as e:
@@ -556,16 +679,17 @@ async def main() -> None:
         except Exception as e:
             await msg.answer(f"❌ Error: {e}")
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # PDF UPLOAD
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
+    # PDF UPLOAD HANDLER
+    # ═════════════════════════════════════════════════════════════════════════
 
     @dp.message(F.document)
     async def handle_pdf(msg: Message) -> None:
-        uid  = msg.from_user.id
-        doc  = msg.document
+        uid = msg.from_user.id
+        doc = msg.document
         if not doc:
             return
+
         fname = (doc.file_name or "").lower()
         mime  = (doc.mime_type  or "").lower()
         if not (fname.endswith(".pdf") or mime == "application/pdf"):
@@ -574,9 +698,10 @@ async def main() -> None:
 
         await msg.answer("⏳ Reading your PDF...")
         try:
-            tf  = await bot.get_file(doc.file_id)
+            # Use msg.bot (correct aiogram 3.x API)
+            tf  = await msg.bot.get_file(doc.file_id)
             buf = io.BytesIO()
-            await bot.download_file(tf.file_path, destination=buf)
+            await msg.bot.download_file(tf.file_path, destination=buf)
             pdf_bytes = buf.getvalue()
         except Exception as e:
             await msg.answer(f"❌ Download failed: {e}")
@@ -585,43 +710,55 @@ async def main() -> None:
         text = extract_text_from_pdf(pdf_bytes)
         if not text or len(text) < 50:
             await msg.answer(
-                "❌ Could not extract text.\n\n"
-                "Make sure it's a text-based PDF (not a scanned image). "
-                "You can also paste your resume as plain text."
+                "❌ Could not extract text from this PDF.\n\n"
+                "*Try one of these:*\n"
+                "1. Make sure it's a text-based PDF (not a scanned image)\n"
+                "2. Open your PDF, select all text, copy and paste it here\n"
+                "3. Export your CV as a new PDF from Word/Google Docs",
+                parse_mode="Markdown",
             )
             return
 
         PDF_STORE[uid] = pdf_bytes
+        word_count = len(text.split())
         step = STATE.get(uid, {}).get("step", "")
 
         if step in ("resume_await_pdf", "resume_upload_new"):
             db.save_master_resume(uid, text)
             STATE[uid] = {"step": "resume_target_role", "resume_text": text}
             await msg.answer(
-                f"✅ Resume saved! ({len(text.split())} words extracted)\n\n"
-                "What role are you targeting?\n_e.g. Data Analyst_",
+                f"✅ Resume saved! _{word_count} words extracted_\n\n"
+                "What role are you targeting?\n"
+                "_e.g. Data Analyst, Business Analyst_",
                 parse_mode="Markdown",
             )
+
         elif step == "tailor_await_pdf":
             db.save_master_resume(uid, text)
             STATE[uid] = {"step": "tailor_jd", "resume_text": text}
             await msg.answer(
-                "✅ Resume saved!\n\nNow paste the *full job description*:",
+                f"✅ Resume saved! _{word_count} words_\n\n"
+                "Now paste the *full job description*:",
                 parse_mode="Markdown",
             )
+
         elif step == "outreach_await_pdf":
             pending = STATE.get(uid, {})
             pending["resume_bytes_b64"] = base64.b64encode(pdf_bytes).decode()
             pending["step"] = "outreach_confirm_send"
             STATE[uid] = pending
             await msg.answer(
-                "✅ Resume ready.\n\nSend this outreach email now?",
+                "✅ Resume ready. Send this outreach email now?",
                 reply_markup=yn_kb("outreach_send_confirmed", "outreach_cancel"),
             )
+
         else:
+            # Generic upload – save and offer options
             db.save_master_resume(uid, text)
             await msg.answer(
-                f"✅ Resume saved! ({len(text.split())} words)\n\nWhat would you like to do?",
+                f"✅ Resume saved! _{word_count} words extracted_\n\n"
+                "What would you like to do?",
+                parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="✏️ Revise it",
                                           callback_data="resume_use_existing")],
@@ -632,9 +769,42 @@ async def main() -> None:
                 ]),
             )
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
+    # PLAIN TEXT FALLBACK (resume paste when PDF fails)
+    # ═════════════════════════════════════════════════════════════════════════
+
+    @dp.message(F.text.startswith("EDUCATION") | F.text.startswith("WORK EXPERIENCE") |
+                F.text.startswith("Praveena") | F.text.startswith("SKILLS"))
+    async def handle_resume_paste(msg: Message) -> None:
+        """Detect pasted resume text and handle like a PDF upload."""
+        uid  = msg.from_user.id
+        text = msg.text.strip()
+        if len(text) < 100:
+            return  # too short, ignore
+
+        db.save_master_resume(uid, text)
+        word_count = len(text.split())
+        step = STATE.get(uid, {}).get("step", "")
+
+        if step == "tailor_jd":
+            # They already started tailor, this is the JD not the resume
+            return
+
+        await msg.answer(
+            f"✅ Resume text saved! _{word_count} words_\n\n"
+            "What would you like to do?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✏️ Revise it",
+                                      callback_data="resume_use_existing")],
+                [InlineKeyboardButton(text="🎯 Tailor to a job",
+                                      callback_data="tailor_from_stored")],
+            ]),
+        )
+
+    # ═════════════════════════════════════════════════════════════════════════
     # CALLBACK QUERIES
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
 
     # ── Resume ────────────────────────────────────────────────────────────────
     @dp.callback_query(F.data == "resume_use_existing")
@@ -642,17 +812,23 @@ async def main() -> None:
         uid    = cb.from_user.id
         resume = db.get_master_resume(uid)
         if not resume:
-            await cb.message.answer("No stored resume. Please upload a PDF.")
+            await cb.message.answer("No stored resume. Please upload a PDF first.")
         else:
             STATE[uid] = {"step": "resume_target_role", "resume_text": resume}
-            await cb.message.answer("What role are you targeting?\n_e.g. Data Analyst_",
-                                    parse_mode="Markdown")
+            await cb.message.answer(
+                "What role are you targeting?\n_e.g. Data Analyst_",
+                parse_mode="Markdown",
+            )
         await cb.answer()
 
     @dp.callback_query(F.data == "resume_upload_new")
     async def cb_resume_new(cb: CallbackQuery) -> None:
         STATE[cb.from_user.id] = {"step": "resume_upload_new"}
-        await cb.message.answer("📤 Send your updated resume as a PDF.")
+        await cb.message.answer(
+            "📤 Send your updated resume as a PDF.\n\n"
+            "_Or paste the full text if your PDF doesn't extract correctly._",
+            parse_mode="Markdown",
+        )
         await cb.answer()
 
     @dp.callback_query(F.data == "tailor_from_stored")
@@ -661,20 +837,23 @@ async def main() -> None:
         resume = db.get_master_resume(uid)
         if resume:
             STATE[uid] = {"step": "tailor_jd", "resume_text": resume}
-            await cb.message.answer("Paste the *job description* below:",
-                                    parse_mode="Markdown")
+            await cb.message.answer(
+                "Paste the *full job description* below:",
+                parse_mode="Markdown",
+            )
         else:
             STATE[uid] = {"step": "tailor_await_pdf"}
             await cb.message.answer("Please upload your resume PDF first.")
         await cb.answer()
 
-    # ── Email ─────────────────────────────────────────────────────────────────
+    # ── Email ──────────────────────────────────────────────────────────────────
     @dp.callback_query(F.data == "email_general")
     async def cb_email_general(cb: CallbackQuery) -> None:
         STATE[cb.from_user.id] = {"step": "email_purpose"}
         await cb.message.answer(
             "What's the *purpose* of this email?\n"
-            "_e.g. follow up on my application, check interview timeline_",
+            "_e.g. follow up on my Data Analyst application at Google, "
+            "check interview timeline, request feedback_",
             parse_mode="Markdown",
         )
         await cb.answer()
@@ -684,7 +863,8 @@ async def main() -> None:
         STATE[cb.from_user.id] = {"step": "outreach_details"}
         await cb.message.answer(
             "📨 *Cold Outreach*\n\n"
-            "One line:\n`email || Name || Role || Company`",
+            "Send one line:\n"
+            "`email || Name || Role || Company`",
             parse_mode="Markdown",
         )
         await cb.answer()
@@ -695,11 +875,13 @@ async def main() -> None:
             "step": "email_purpose",
             "purpose_preset": "thank you after job interview",
         }
-        await cb.message.answer("Who interviewed you? _(their name)_",
-                                parse_mode="Markdown")
+        await cb.message.answer(
+            "Who interviewed you? _(their name)_",
+            parse_mode="Markdown",
+        )
         await cb.answer()
 
-    # ── Outreach ──────────────────────────────────────────────────────────────
+    # ── Outreach send/cancel ───────────────────────────────────────────────────
     @dp.callback_query(F.data == "outreach_send_confirmed")
     async def cb_outreach_send(cb: CallbackQuery) -> None:
         uid   = cb.from_user.id
@@ -709,13 +891,17 @@ async def main() -> None:
             r = await api_post("/email/outreach", {**state, "send_now": True})
             if r.get("sent"):
                 await cb.message.answer("✅ Outreach email sent!")
-                db.log_email(uid, state.get("to_email",""), state.get("recipient_name",""),
-                             state.get("company",""), state.get("role",""),
-                             r.get("subject",""), r.get("body",""),
-                             True, str(date.today() + timedelta(days=7)))
-                STATE[uid] = {"step": "track_after_outreach",
-                              "company": state.get("company",""),
-                              "role":    state.get("role","")}
+                db.log_email(
+                    uid, state.get("to_email",""), state.get("recipient_name",""),
+                    state.get("company",""), state.get("role",""),
+                    r.get("subject",""), r.get("body",""),
+                    True, str(date.today() + timedelta(days=7)),
+                )
+                STATE[uid] = {
+                    "step":    "track_after_outreach",
+                    "company": state.get("company",""),
+                    "role":    state.get("role",""),
+                }
                 await cb.message.answer(
                     f"Track this application to *{state.get('company','')}*?",
                     parse_mode="Markdown",
@@ -723,7 +909,8 @@ async def main() -> None:
                 )
             else:
                 await cb.message.answer(
-                    "❌ Send failed. Is Gmail connected? /gmail\\_connect",
+                    "❌ Send failed. Is Gmail connected?\n"
+                    "Use /gmail\\_connect to link your Gmail.",
                     parse_mode="Markdown",
                 )
         except Exception as e:
@@ -743,12 +930,12 @@ async def main() -> None:
         try:
             r = await api_post("/applications/add", {
                 "telegram_id": uid,
-                "company": state.get("company","Unknown"),
-                "role":    state.get("role","Unknown"),
+                "company": state.get("company", "Unknown"),
+                "role":    state.get("role", "Unknown"),
                 "status":  "Applied",
             })
             await cb.message.answer(
-                f"✅ Tracked! Follow-up: *{r.get('followup_date','')}*",
+                f"✅ Tracked! Follow-up set for *{r.get('followup_date','')}*",
                 parse_mode="Markdown",
             )
         except Exception as e:
@@ -760,10 +947,10 @@ async def main() -> None:
     @dp.callback_query(F.data == "track_auto_no")
     async def cb_track_no(cb: CallbackQuery) -> None:
         STATE.pop(cb.from_user.id, None)
-        await cb.message.answer("OK! 👇", reply_markup=main_menu())
+        await cb.message.answer("OK! Back to main menu 👇", reply_markup=main_menu())
         await cb.answer()
 
-    # ── Track status ──────────────────────────────────────────────────────────
+    # ── Track status buttons ───────────────────────────────────────────────────
     @dp.callback_query(F.data.startswith("track_status_"))
     async def cb_track_status(cb: CallbackQuery) -> None:
         uid    = cb.from_user.id
@@ -772,12 +959,12 @@ async def main() -> None:
         try:
             r = await api_post("/applications/add", {
                 "telegram_id": uid,
-                "company": state.get("company","Unknown"),
-                "role":    state.get("role","Unknown"),
+                "company": state.get("company", "Unknown"),
+                "role":    state.get("role", "Unknown"),
                 "status":  status,
-                "url":     state.get("url",""),
-                "salary":  state.get("salary",""),
-                "source":  state.get("source",""),
+                "url":     state.get("url", ""),
+                "salary":  state.get("salary", ""),
+                "source":  state.get("source", ""),
             })
             await cb.message.answer(
                 f"✅ *Tracked!*\n"
@@ -791,7 +978,7 @@ async def main() -> None:
         await cb.message.answer("Back to main menu 👇", reply_markup=main_menu())
         await cb.answer()
 
-    # ── Job selection ─────────────────────────────────────────────────────────
+    # ── Job selection ──────────────────────────────────────────────────────────
     @dp.callback_query(F.data.startswith("select_job_"))
     async def cb_select_job(cb: CallbackQuery) -> None:
         uid  = cb.from_user.id
@@ -804,7 +991,8 @@ async def main() -> None:
         STATE[uid] = {"step": "job_action", "job": job}
         sal = f"\n💰 {job['salary']}" if job.get("salary") else ""
         await cb.message.answer(
-            f"*{job['title']}*\n🏢 {job['company']}{sal}\n\nWhat would you like to do?",
+            f"*{job['title']}*\n🏢 {job['company']}{sal}\n\n"
+            "What would you like to do?",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🎯 Tailor my resume",
@@ -821,29 +1009,41 @@ async def main() -> None:
 
     @dp.callback_query(F.data == "job_do_tailor")
     async def cb_job_tailor(cb: CallbackQuery) -> None:
-        uid    = cb.from_user.id
-        job    = STATE.get(uid, {}).get("job", {})
-        resume = db.get_master_resume(uid)
+        uid     = cb.from_user.id
+        job     = STATE.get(uid, {}).get("job", {})
+        resume  = db.get_master_resume(uid)
         auto_jd = job.get("description", "")
         if not resume:
-            STATE[uid] = {"step": "tailor_await_pdf",
-                          "job_title": job.get("title",""),
-                          "company":   job.get("company","")}
-            await cb.message.answer("Please upload your resume PDF first.")
+            STATE[uid] = {
+                "step":      "tailor_await_pdf",
+                "job_title": job.get("title", ""),
+                "company":   job.get("company", ""),
+            }
+            await cb.message.answer(
+                "Please upload your resume PDF first.\n\n"
+                "_Or paste your resume text directly._",
+                parse_mode="Markdown",
+            )
         elif auto_jd:
-            STATE[uid] = {"resume_text": resume,
-                          "job_title":   job.get("title",""),
-                          "company":     job.get("company",""),
-                          "jd_text":     auto_jd}
+            STATE[uid] = {
+                "resume_text": resume,
+                "job_title":   job.get("title", ""),
+                "company":     job.get("company", ""),
+                "jd_text":     auto_jd,
+            }
             await cb.message.answer("⏳ Tailoring your resume...")
             await _run_tailor(cb.message, uid)
         else:
-            STATE[uid] = {"step": "tailor_jd",
-                          "resume_text": resume,
-                          "job_title":   job.get("title",""),
-                          "company":     job.get("company","")}
-            await cb.message.answer("Paste the *full job description* for this role:",
-                                    parse_mode="Markdown")
+            STATE[uid] = {
+                "step":        "tailor_jd",
+                "resume_text": resume,
+                "job_title":   job.get("title", ""),
+                "company":     job.get("company", ""),
+            }
+            await cb.message.answer(
+                "Paste the *full job description* for this role:",
+                parse_mode="Markdown",
+            )
         await cb.answer()
 
     @dp.callback_query(F.data == "job_do_track")
@@ -853,12 +1053,12 @@ async def main() -> None:
         try:
             r = await api_post("/applications/add", {
                 "telegram_id": uid,
-                "company": job.get("company","Unknown"),
-                "role":    job.get("title","Unknown"),
+                "company": job.get("company", "Unknown"),
+                "role":    job.get("title", "Unknown"),
                 "status":  "Applied",
-                "url":     job.get("url",""),
-                "salary":  job.get("salary",""),
-                "source":  job.get("source",""),
+                "url":     job.get("url", ""),
+                "salary":  job.get("salary", ""),
+                "source":  job.get("source", ""),
             })
             await cb.message.answer(
                 f"✅ Tracked! Follow-up: *{r.get('followup_date','')}*",
@@ -872,12 +1072,15 @@ async def main() -> None:
     async def cb_job_outreach(cb: CallbackQuery) -> None:
         uid = cb.from_user.id
         job = STATE.get(uid, {}).get("job", {})
-        STATE[uid] = {"step":           "outreach_details",
-                      "prefill_company": job.get("company",""),
-                      "prefill_role":    job.get("title","")}
+        STATE[uid] = {
+            "step":            "outreach_details",
+            "prefill_company": job.get("company", ""),
+            "prefill_role":    job.get("title", ""),
+        }
         await cb.message.answer(
             f"📨 Outreach for *{job.get('title','')}* at *{job.get('company','')}*\n\n"
-            "Send:\n`email || Recipient Name`\n_(role and company are pre-filled)_",
+            "Send:\n`email || Recipient Name`\n"
+            "_(role and company are pre-filled)_",
             parse_mode="Markdown",
         )
         await cb.answer()
@@ -893,33 +1096,33 @@ async def main() -> None:
         )
         try:
             r = await api_post("/interview/prepare", {
-                "role":        job.get("title",""),
-                "company":     job.get("company",""),
+                "role":        job.get("title", ""),
+                "company":     job.get("company", ""),
                 "focus_areas": [],
             })
-            await send_long(cb.message, r.get("text",""))
+            await send_long(cb.message, r.get("text", ""))
         except Exception as e:
             await cb.message.answer(f"❌ Error: {e}")
         await cb.answer()
 
-    # ── Outreach send-now check ───────────────────────────────────────────────
     @dp.callback_query(F.data == "outreach_do_send_check")
     async def cb_outreach_do_send(cb: CallbackQuery) -> None:
         uid   = cb.from_user.id
         state = STATE.get(uid, {})
-        # Verify Gmail connected
         try:
             gd = await api_get(f"/gmail/status/{uid}")
             ok = gd.get("connected", False)
         except Exception:
             ok = False
+
         if not ok:
             await cb.message.answer(
-                "❌ Gmail not connected. Use /gmail\\_connect first.",
+                "❌ Gmail not connected.\n\nUse /gmail\\_connect first.",
                 parse_mode="Markdown",
             )
             await cb.answer()
             return
+
         pdf = PDF_STORE.get(uid)
         if not pdf:
             STATE[uid] = {**state, "step": "outreach_await_pdf"}
@@ -934,14 +1137,15 @@ async def main() -> None:
                 r = await api_post("/email/outreach", state)
                 if r.get("sent"):
                     await cb.message.answer("✅ Outreach email sent!")
-                    db.log_email(uid, state.get("to_email",""),
-                                 state.get("recipient_name",""),
-                                 state.get("company",""), state.get("role",""),
-                                 r.get("subject",""), r.get("body",""),
-                                 True, str(date.today() + timedelta(days=7)))
+                    db.log_email(
+                        uid, state.get("to_email",""), state.get("recipient_name",""),
+                        state.get("company",""), state.get("role",""),
+                        r.get("subject",""), r.get("body",""),
+                        True, str(date.today() + timedelta(days=7)),
+                    )
                 else:
                     await cb.message.answer(
-                        "❌ Send failed. Check Gmail connection with /gmail\\_status",
+                        "❌ Send failed. Check /gmail\\_status",
                         parse_mode="Markdown",
                     )
             except Exception as e:
@@ -949,9 +1153,9 @@ async def main() -> None:
             STATE.pop(uid, None)
         await cb.answer()
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # TEXT STATE MACHINE
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
 
     @dp.message(F.text)
     async def handle_text(msg: Message) -> None:
@@ -960,16 +1164,20 @@ async def main() -> None:
         state = STATE.get(uid, {})
         step  = state.get("step", "")
 
-        # ── Job search ──────────────────────────────────────────────────────
+        # ── Job search ────────────────────────────────────────────────────────
         if step == "jobs_role":
             STATE[uid] = {**state, "step": "jobs_location", "role": text}
-            await msg.answer("📍 Location?\n_Singapore / Remote / Worldwide_",
-                             parse_mode="Markdown")
+            await msg.answer(
+                "📍 Location?\n_Singapore / Remote / Worldwide_",
+                parse_mode="Markdown",
+            )
 
         elif step == "jobs_location":
             STATE[uid] = {**state, "step": "jobs_limit", "location": text}
-            await msg.answer("How many results? _(1–20, default 10)_",
-                             parse_mode="Markdown")
+            await msg.answer(
+                "How many results? _(1–20, default 10)_",
+                parse_mode="Markdown",
+            )
 
         elif step == "jobs_limit":
             try:
@@ -980,13 +1188,15 @@ async def main() -> None:
             loc  = state.get("location", "singapore")
             await msg.answer(
                 f"🔍 Searching *{limit}* jobs for *{role}* in *{loc}*...\n"
-                "_Checking 5 sources in parallel..._",
+                "_Checking 6 sources in parallel..._",
                 parse_mode="Markdown",
             )
             try:
                 data = await api_post("/jobs/search", {
-                    "role": role, "location": loc,
-                    "limit": limit, "telegram_id": uid,
+                    "role":        role,
+                    "location":    loc,
+                    "limit":       limit,
+                    "telegram_id": uid,
                 })
                 jobs = data.get("jobs", [])
                 JOBS_CACHE[uid] = jobs
@@ -994,7 +1204,7 @@ async def main() -> None:
                 if jobs:
                     buttons = [
                         [InlineKeyboardButton(
-                            text=f"{i}. {j['title'][:28]}… @ {j['company'][:18]}",
+                            text=f"{i}. {j['title'][:28]} @ {j['company'][:18]}",
                             callback_data=f"select_job_{i}",
                         )]
                         for i, j in enumerate(jobs[:10], 1)
@@ -1007,11 +1217,13 @@ async def main() -> None:
                 await msg.answer(f"❌ Search error: {e}")
             STATE.pop(uid, None)
 
-        # ── Digest ──────────────────────────────────────────────────────────
+        # ── Digest ────────────────────────────────────────────────────────────
         elif step == "digest_role":
             STATE[uid] = {**state, "step": "digest_location", "role": text}
-            await msg.answer("📍 Location? _(Singapore / Remote)_",
-                             parse_mode="Markdown")
+            await msg.answer(
+                "📍 Location? _(Singapore / Remote)_",
+                parse_mode="Markdown",
+            )
 
         elif step == "digest_location":
             role = state.get("role", "")
@@ -1019,31 +1231,35 @@ async def main() -> None:
             STATE.pop(uid, None)
             await msg.answer(
                 f"✅ Saved! Every morning at *{settings.daily_digest_hour}:00 AM* "
-                f"({settings.daily_digest_timezone}) I'll push new *{role}* jobs in *{text}*.",
+                f"({settings.daily_digest_timezone}) I'll push new *{role}* jobs in *{text}*.\n\n"
+                "Use /testalert to test it right now.",
                 parse_mode="Markdown",
             )
 
-        # ── Resume revise ───────────────────────────────────────────────────
+        # ── Resume revise ─────────────────────────────────────────────────────
         elif step == "resume_target_role":
             resume = state.get("resume_text", "")
-            await msg.answer("⏳ Analysing your resume...")
+            await msg.answer("⏳ Analysing your resume... _(~15 seconds)_",
+                             parse_mode="Markdown")
             try:
                 r = await api_post("/resume/revise", {
                     "resume_text": resume,
                     "target_role": text,
                     "telegram_id": uid,
                 })
-                await send_long(msg, r.get("text",""))
+                await send_long(msg, r.get("text", ""))
             except Exception as e:
                 await msg.answer(f"❌ Error: {e}")
             STATE.pop(uid, None)
             await msg.answer("Done! Back to main menu 👇", reply_markup=main_menu())
 
-        # ── Resume tailor ───────────────────────────────────────────────────
+        # ── Resume tailor ─────────────────────────────────────────────────────
         elif step == "tailor_jd":
             STATE[uid] = {**state, "step": "tailor_job_title", "jd_text": text}
-            await msg.answer("Job title for this role?\n_e.g. Data Analyst_",
-                             parse_mode="Markdown")
+            await msg.answer(
+                "Job title for this role?\n_e.g. Data Analyst_",
+                parse_mode="Markdown",
+            )
 
         elif step == "tailor_job_title":
             STATE[uid] = {**state, "step": "tailor_company", "job_title": text}
@@ -1051,11 +1267,11 @@ async def main() -> None:
 
         elif step == "tailor_company":
             STATE[uid] = {**state, "company": text}
-            await msg.answer("⏳ Tailoring your resume... _(~15 seconds)_",
+            await msg.answer("⏳ Tailoring your resume... _(~20 seconds)_",
                              parse_mode="Markdown")
             await _run_tailor(msg, uid)
 
-        # ── Email general ───────────────────────────────────────────────────
+        # ── Email general ─────────────────────────────────────────────────────
         elif step == "email_purpose":
             preset  = state.get("purpose_preset", "")
             purpose = preset or text
@@ -1066,7 +1282,8 @@ async def main() -> None:
             STATE[uid] = {**state, "step": "email_context", "recipient_name": text}
             await msg.answer(
                 "Any extra context?\n"
-                "_e.g. applied via LinkedIn last week, met at NUS career fair_",
+                "_e.g. applied via LinkedIn last week, "
+                "met at NUS career fair, interviewed on Tuesday_",
                 parse_mode="Markdown",
             )
 
@@ -1074,39 +1291,52 @@ async def main() -> None:
             await msg.answer("⏳ Drafting email...")
             try:
                 r = await api_post("/email/draft", {
-                    "purpose":        state.get("purpose",""),
-                    "recipient_name": state.get("recipient_name",""),
+                    "purpose":        state.get("purpose", ""),
+                    "recipient_name": state.get("recipient_name", ""),
                     "context":        text,
                     "tone":           "professional",
                 })
-                await send_long(msg, r.get("text",""))
+                await send_long(msg, r.get("text", ""))
             except Exception as e:
                 await msg.answer(f"❌ Error: {e}")
             STATE.pop(uid, None)
             await msg.answer("Done! Back to main menu 👇", reply_markup=main_menu())
 
-        # ── Outreach ────────────────────────────────────────────────────────
+        # ── Outreach ──────────────────────────────────────────────────────────
         elif step == "outreach_details":
             parts          = [p.strip() for p in text.split("||")]
-            prefill_co     = state.get("prefill_company","")
-            prefill_role   = state.get("prefill_role","")
+            prefill_co     = state.get("prefill_company", "")
+            prefill_role   = state.get("prefill_role", "")
+
             if len(parts) < 2:
-                await msg.answer("Format: `email || Name || Role || Company`",
-                                 parse_mode="Markdown")
+                await msg.answer(
+                    "Please use format:\n"
+                    "`email || Name`  _(if from job card — role & company pre-filled)_\n"
+                    "or\n"
+                    "`email || Name || Role || Company`  _(manual entry)_",
+                    parse_mode="Markdown",
+                )
                 return
+
             to_email = parts[0]
             to_name  = parts[1]
             role     = parts[2] if len(parts) > 2 else prefill_role
             company  = parts[3] if len(parts) > 3 else prefill_co
+
             if not role or not company:
-                await msg.answer("Missing role or company.\n"
-                                 "Format: `email || Name || Role || Company`",
-                                 parse_mode="Markdown")
+                await msg.answer(
+                    "❌ Missing role or company.\n\n"
+                    "Format: `email || Name || Role || Company`\n"
+                    "Example: `hr@grab.com || Sarah || Data Analyst || Grab`",
+                    parse_mode="Markdown",
+                )
                 return
+
             kws = ""
             stored = db.get_master_resume(uid)
             if stored:
                 kws = ", ".join(extract_keywords(stored)[:12])
+
             await msg.answer("⏳ Drafting outreach email...")
             try:
                 r = await api_post("/email/outreach", {
@@ -1119,21 +1349,23 @@ async def main() -> None:
                     "resume_highlights": kws,
                     "send_now":          False,
                 })
-                subject = r.get("subject","")
-                body    = r.get("body","")
-                await send_long(msg,
-                    f"📧 *Draft:*\n\n*Subject:* {subject}\n\n{body}")
+                subject = r.get("subject", "")
+                body    = r.get("body", "")
+                await send_long(
+                    msg,
+                    f"📧 *Draft:*\n\n*Subject:* {subject}\n\n{body}",
+                )
                 STATE[uid] = {
-                    "step":            "outreach_confirm",
-                    "telegram_id":     uid,
-                    "to_email":        to_email,
-                    "recipient_name":  to_name,
-                    "role":            role,
-                    "company":         company,
-                    "sender_name":     msg.from_user.full_name or "",
+                    "step":             "outreach_confirm",
+                    "telegram_id":      uid,
+                    "to_email":         to_email,
+                    "recipient_name":   to_name,
+                    "role":             role,
+                    "company":          company,
+                    "sender_name":      msg.from_user.full_name or "",
                     "resume_highlights": kws,
-                    "subject":         subject,
-                    "body":            body,
+                    "subject":          subject,
+                    "body":             body,
                 }
                 await msg.answer(
                     "Send this now via Gmail?",
@@ -1148,7 +1380,7 @@ async def main() -> None:
                 await msg.answer(f"❌ Error: {e}")
                 STATE.pop(uid, None)
 
-        # ── Track ───────────────────────────────────────────────────────────
+        # ── Track application ─────────────────────────────────────────────────
         elif step == "track_company":
             STATE[uid] = {**state, "step": "track_role", "company": text}
             await msg.answer("Role you applied for?")
@@ -1171,65 +1403,75 @@ async def main() -> None:
                 ]),
             )
 
-        # ── Interview ───────────────────────────────────────────────────────
+        # ── Interview prep ────────────────────────────────────────────────────
         elif step == "interview_role":
             STATE[uid] = {**state, "step": "interview_company", "role": text}
             await msg.answer("Which company?")
 
         elif step == "interview_company":
-            role = state.get("role","")
+            role = state.get("role", "")
             await msg.answer(
-                f"⏳ Building interview guide for *{role}* at *{text}*...",
+                f"⏳ Building interview guide for *{role}* at *{text}*... _(~20 seconds)_",
                 parse_mode="Markdown",
             )
             try:
                 r = await api_post("/interview/prepare", {
-                    "role": role, "company": text, "focus_areas": [],
+                    "role":        role,
+                    "company":     text,
+                    "focus_areas": [],
                 })
-                await send_long(msg, r.get("text",""))
+                await send_long(msg, r.get("text", ""))
             except Exception as e:
                 await msg.answer(f"❌ Error: {e}")
             STATE.pop(uid, None)
             await msg.answer("Done! Back to main menu 👇", reply_markup=main_menu())
 
-        # ── Practice ────────────────────────────────────────────────────────
+        # ── Mock interview ────────────────────────────────────────────────────
         elif step == "practice_role":
             STATE[uid] = {**state, "step": "practice_company", "role": text}
             await msg.answer("Which company?")
 
         elif step == "practice_company":
-            role = state.get("role","")
+            role = state.get("role", "")
             await msg.answer(
                 f"🎯 *Mock interview:* {role} at {text}\n\n"
-                "5 questions. /stop to exit early.\n\n"
+                "5 questions, AI feedback after each.\n"
+                "/stop to exit early.\n\n"
                 "⏳ Getting question 1...",
                 parse_mode="Markdown",
             )
             from app.services.llm_tasks import practice_question
             try:
                 q = await practice_question(role, text, "behavioural")
-                PRACTICE[uid] = {"role": role, "company": text,
-                                  "question": q, "count": 1}
-                STATE[uid]    = {"step": "practice_answer"}
+                PRACTICE[uid] = {
+                    "role":     role,
+                    "company":  text,
+                    "question": q,
+                    "count":    1,
+                }
+                STATE[uid] = {"step": "practice_answer"}
                 await msg.answer(f"❓ *Question 1 of 5:*\n\n{q}",
                                  parse_mode="Markdown")
             except Exception as e:
-                await msg.answer(f"❌ Error: {e}")
+                await msg.answer(f"❌ Error generating question: {e}")
                 STATE.pop(uid, None)
 
         elif step == "practice_answer":
             ctx   = PRACTICE.get(uid, {})
             count = ctx.get("count", 1)
-            await msg.answer("📝 Evaluating...")
+            await msg.answer("📝 Evaluating your answer...")
             from app.services.llm_tasks import evaluate_answer, practice_question
             try:
-                fb = await evaluate_answer(ctx.get("question",""), text,
-                                           ctx.get("role",""))
+                fb = await evaluate_answer(
+                    ctx.get("question", ""), text, ctx.get("role", "")
+                )
                 await send_long(msg, fb)
+
                 if count < 5:
                     q_type = "technical" if count % 2 == 0 else "behavioural"
-                    nq = await practice_question(ctx.get("role",""),
-                                                 ctx.get("company",""), q_type)
+                    nq = await practice_question(
+                        ctx.get("role", ""), ctx.get("company", ""), q_type
+                    )
                     PRACTICE[uid] = {**ctx, "question": nq, "count": count + 1}
                     await msg.answer(
                         f"❓ *Question {count + 1} of 5:*\n\n{nq}",
@@ -1247,12 +1489,11 @@ async def main() -> None:
             except Exception as e:
                 await msg.answer(f"❌ Error: {e}")
 
-        # ── STAR story ──────────────────────────────────────────────────────
+        # ── STAR story ────────────────────────────────────────────────────────
         elif step == "star_title":
             STATE[uid] = {**state, "step": "star_situation", "title": text}
             await msg.answer(
-                "📖 *Situation*\n\n"
-                "What was the context or challenge?",
+                "📖 *Situation*\n\nWhat was the context or challenge?",
                 parse_mode="Markdown",
             )
 
@@ -1264,18 +1505,18 @@ async def main() -> None:
             )
 
         elif step == "star_task":
-            STATE[uid] = {**state, "step": "star_action", "action_needed": text}
+            STATE[uid] = {**state, "step": "star_action", "task": text}
             await msg.answer(
                 "⚡ *Action*\n\nWhat did YOU specifically do?\n"
-                "_(Use 'I', not 'we'. Be specific.)_",
+                "_(Use 'I', not 'we'. Be specific and concrete.)_",
                 parse_mode="Markdown",
             )
 
-        elif step == "star_action_needed":
+        elif step == "star_action":
             STATE[uid] = {**state, "step": "star_result", "action": text}
             await msg.answer(
                 "📈 *Result*\n\nWhat was the outcome?\n"
-                "_(Include numbers/metrics if possible)_",
+                "_(Include numbers/metrics if possible, e.g. 30% faster, saved 5 hours/week)_",
                 parse_mode="Markdown",
             )
 
@@ -1283,7 +1524,7 @@ async def main() -> None:
             STATE[uid] = {**state, "step": "star_themes", "result": text}
             await msg.answer(
                 "🏷️ *Themes* (comma-separated)\n\n"
-                "_e.g. leadership, analytics, problem-solving, communication_",
+                "_e.g. leadership, analytics, problem-solving, stakeholder management_",
                 parse_mode="Markdown",
             )
 
@@ -1291,11 +1532,11 @@ async def main() -> None:
             s = STATE.get(uid, {})
             db.add_star_story(
                 uid,
-                title=s.get("title",""),
-                situation=s.get("situation",""),
-                task=s.get("action_needed",""),
-                action=s.get("action",""),
-                result=s.get("result",""),
+                title=s.get("title", ""),
+                situation=s.get("situation", ""),
+                task=s.get("task", ""),
+                action=s.get("action", ""),
+                result=s.get("result", ""),
                 themes=text,
             )
             STATE.pop(uid, None)
@@ -1309,20 +1550,54 @@ async def main() -> None:
                 reply_markup=main_menu(),
             )
 
-        # ── Fallback ────────────────────────────────────────────────────────
+        # ── Custom reminder ───────────────────────────────────────────────────
+        elif step == "remindme_text":
+            STATE[uid] = {**state, "step": "remindme_days", "reminder_text": text}
+            await msg.answer(
+                "⏰ In how many days should I remind you?\n"
+                "_e.g. 1, 3, 7_",
+                parse_mode="Markdown",
+            )
+
+        elif step == "remindme_days":
+            try:
+                days = max(1, min(30, int(text)))
+            except ValueError:
+                days = 3
+            reminder = state.get("reminder_text", "")
+            remind_date = date.today() + timedelta(days=days)
+            # Store as a special application entry so followup_check picks it up
+            db.add_application(
+                uid,
+                company="Reminder",
+                role=reminder,
+                status="Applied",
+                notes=f"Custom reminder set for {days} day(s)",
+                followup_date=str(remind_date),
+            )
+            STATE.pop(uid, None)
+            await msg.answer(
+                f"✅ *Reminder set!*\n\n"
+                f"📌 _{reminder}_\n"
+                f"📅 I'll remind you on *{remind_date}*",
+                parse_mode="Markdown",
+                reply_markup=main_menu(),
+            )
+
+        # ── Fallback ──────────────────────────────────────────────────────────
         else:
             await msg.answer(
                 "👇 Use the menu below or /help for all commands.",
                 reply_markup=main_menu(),
             )
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     # START POLLING
-    # ══════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════
     print("\n" + "═" * 55)
-    print("  Job Hunter PA – Telegram Bot v3 (final)")
-    print(f"  Backend  : {BACKEND}")
-    print(f"  Digest   : {settings.daily_digest_hour}:00 {settings.daily_digest_timezone}")
+    print("  Job Hunter PA – Telegram Bot v3 (Complete)")
+    print(f"  Backend : {BACKEND}")
+    print(f"  Digest  : {settings.daily_digest_hour}:00 {settings.daily_digest_timezone}")
     print("═" * 55 + "\n")
 
     await dp.start_polling(bot)
@@ -1330,3 +1605,4 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+     

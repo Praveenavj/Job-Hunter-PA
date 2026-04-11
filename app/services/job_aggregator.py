@@ -11,26 +11,29 @@ from app.services.job_sources.indeed_rss import IndeedRSSSource
 from app.services.job_sources.jobicy_source import JobicySource
 from app.services.job_sources.adzuna_source import AdzunaSource
 from app.services.job_sources.careers_gov import CareersGovSource
+from app.services.job_sources.jora_rss import JoraRSSSource
 from app import database as db
 
 logger = logging.getLogger(__name__)
 
-# All sources, priority order
+# All sources, priority order (6 sources total)
 SOURCES = [
     MyCareersFutureSource(),
+    AdzunaSource(),
     IndeedRSSSource(),
     CareersGovSource(),
-    AdzunaSource(),
+    JoraRSSSource(),
     JobicySource(),
 ]
 
 # Source credibility weights for ranking
 SOURCE_SCORE = {
-    "MyCareersFuture": 20,
+    "MyCareersFuture": 22,
+    "Adzuna":          20,
     "Indeed":          18,
     "Careers@Gov":     18,
-    "Adzuna":          16,
-    "Jobicy":          14,
+    "Jora":            15,
+    "Jobicy":          13,
 }
 
 

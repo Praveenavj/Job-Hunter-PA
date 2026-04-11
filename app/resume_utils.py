@@ -43,18 +43,57 @@ TECH_KEYWORDS = {
 
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
-    """Extract plain text from a PDF file using PyMuPDF."""
+    """
+    Extract plain text from PDF using three methods in order:
+      1. PyMuPDF (fitz) – fastest, handles most PDFs
+      2. pdfminer.six   – better with unusual encodings
+      3. Raw text scan  – last resort byte-level search
+    Returns empty string only if all three fail.
+    """
+    # ── Method 1: PyMuPDF ────────────────────────────────────────────────────
     try:
-        import fitz  # PyMuPDF
+        import fitz
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        pages = [page.get_text() for page in doc]
-        return "\n".join(pages).strip()
-    except ImportError:
-        logger.error("PyMuPDF not installed – pip install PyMuPDF")
-        return ""
+        text = "\n".join(page.get_text() for page in doc).strip()
+        if text and len(text) > 50:
+            logger.info(f"PDF extracted via PyMuPDF: {len(text)} chars")
+            return text
+        # Try with different extraction mode
+        text = "\n".join(page.get_text("text") for page in doc).strip()
+        if text and len(text) > 50:
+            logger.info(f"PDF extracted via PyMuPDF (text mode): {len(text)} chars")
+            return text
     except Exception as e:
-        logger.error(f"PDF extraction failed: {e}")
-        return ""
+        logger.warning(f"PyMuPDF failed: {e}")
+
+    # ── Method 2: pdfminer.six ───────────────────────────────────────────────
+    try:
+        from pdfminer.high_level import extract_text as pdfminer_extract
+        import io
+        text = pdfminer_extract(io.BytesIO(pdf_bytes)).strip()
+        if text and len(text) > 50:
+            logger.info(f"PDF extracted via pdfminer: {len(text)} chars")
+            return text
+    except ImportError:
+        logger.warning("pdfminer.six not installed – run: pip install pdfminer.six")
+    except Exception as e:
+        logger.warning(f"pdfminer failed: {e}")
+
+    # ── Method 3: Raw byte scan ──────────────────────────────────────────────
+    try:
+        raw = pdf_bytes.decode("latin-1", errors="replace")
+        import re as _re
+        # Extract printable ASCII runs from raw PDF bytes
+        chunks = _re.findall(r'[A-Za-z0-9 ,.\-\n\t\'\"@:;/()]{20,}', raw)
+        text = "\n".join(chunks).strip()
+        if text and len(text) > 50:
+            logger.warning(f"PDF extracted via raw scan (fallback): {len(text)} chars")
+            return text
+    except Exception as e:
+        logger.error(f"Raw PDF scan failed: {e}")
+
+    logger.error("All PDF extraction methods failed")
+    return ""
 
 
 def extract_keywords(text: str) -> list[str]:

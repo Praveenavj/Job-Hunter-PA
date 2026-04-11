@@ -1,6 +1,6 @@
 """
-Job Hunter PA – FastAPI backend.
-All heavy work lives here; the Telegram bot just calls these endpoints.
+Job Hunter PA – FastAPI backend v2.1
+All endpoints. LLM errors returned as text (no 500s).
 """
 from __future__ import annotations
 import base64
@@ -12,25 +12,22 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from app import database as db
-from app import llm_client
 from app.config import settings
-from app.services import job_aggregator
-from app.services import gmail_service
-from app.services import llm_tasks
-from app.resume_utils import extract_text_from_pdf, gap_analysis
+from app.services import job_aggregator, gmail_service, llm_tasks
+from app.resume_utils import gap_analysis
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 db.init_db()
-app = FastAPI(title="Job Hunter PA", version="2.0.0")
+app = FastAPI(title="Job Hunter PA", version="2.1.0")
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "2.0.0"}
+    return {"status": "ok", "version": "2.1.0"}
 
 
 # ── Job Search ────────────────────────────────────────────────────────────────
@@ -47,11 +44,8 @@ class JobsRequest(BaseModel):
 async def search_jobs(req: JobsRequest):
     try:
         jobs = await job_aggregator.search_jobs(
-            query=req.role,
-            location=req.location,
-            limit=req.limit,
-            telegram_id=req.telegram_id,
-            new_only=req.new_only,
+            query=req.role, location=req.location, limit=req.limit,
+            telegram_id=req.telegram_id, new_only=req.new_only,
         )
         return {"jobs": jobs, "total": len(jobs)}
     except Exception as e:
@@ -68,13 +62,11 @@ class ResumeReviseRequest(BaseModel):
 
 @app.post("/resume/revise")
 async def revise_resume(req: ResumeReviseRequest):
-    try:
-        if req.telegram_id:
-            db.save_master_resume(req.telegram_id, req.resume_text)
-        text = await llm_tasks.resume_revise(req.resume_text, req.target_role)
-        return {"text": text}
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    if req.telegram_id:
+        db.save_master_resume(req.telegram_id, req.resume_text)
+    # llm_client.complete never raises - returns error string on failure
+    text = await llm_tasks.resume_revise(req.resume_text, req.target_role)
+    return {"text": text}
 
 
 class TailorRequest(BaseModel):
@@ -86,14 +78,11 @@ class TailorRequest(BaseModel):
 
 @app.post("/resume/tailor")
 async def tailor_resume(req: TailorRequest):
-    try:
-        text = await llm_tasks.resume_tailor(
-            req.resume_text, req.job_description, req.job_title, req.company
-        )
-        gap = gap_analysis(req.resume_text, req.job_description)
-        return {"text": text, "gap": gap}
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    text = await llm_tasks.resume_tailor(
+        req.resume_text, req.job_description, req.job_title, req.company
+    )
+    gap = gap_analysis(req.resume_text, req.job_description)
+    return {"text": text, "gap": gap}
 
 
 # ── Email ─────────────────────────────────────────────────────────────────────
@@ -107,11 +96,10 @@ class EmailDraftRequest(BaseModel):
 
 @app.post("/email/draft")
 async def draft_email(req: EmailDraftRequest):
-    try:
-        text = await llm_tasks.draft_email(req.purpose, req.recipient_name, req.context, req.tone)
-        return {"text": text}
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    text = await llm_tasks.draft_email(
+        req.purpose, req.recipient_name, req.context, req.tone
+    )
+    return {"text": text}
 
 
 class OutreachRequest(BaseModel):
@@ -128,26 +116,21 @@ class OutreachRequest(BaseModel):
 
 @app.post("/email/outreach")
 async def outreach_email(req: OutreachRequest):
-    try:
-        subject, body = await llm_tasks.draft_outreach(
-            req.recipient_name, req.role, req.company,
-            req.sender_name, req.resume_highlights,
-        )
-        if not req.send_now:
-            return {"subject": subject, "body": body, "sent": False}
+    subject, body = await llm_tasks.draft_outreach(
+        req.recipient_name, req.role, req.company,
+        req.sender_name, req.resume_highlights,
+    )
+    if not req.send_now:
+        return {"subject": subject, "body": body, "sent": False}
 
-        att_bytes = base64.b64decode(req.resume_bytes_b64) if req.resume_bytes_b64 else None
-        ok, msg_id = gmail_service.send_email(
-            req.telegram_id, req.to_email, subject, body,
-            attachment_bytes=att_bytes, attachment_name="resume.pdf",
-        )
-        if not ok:
-            raise HTTPException(400, msg_id)
-        return {"subject": subject, "body": body, "sent": True, "message_id": msg_id}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    att_bytes = base64.b64decode(req.resume_bytes_b64) if req.resume_bytes_b64 else None
+    ok, msg_id = gmail_service.send_email(
+        req.telegram_id, req.to_email, subject, body,
+        attachment_bytes=att_bytes, attachment_name="resume.pdf",
+    )
+    if not ok:
+        raise HTTPException(400, msg_id)
+    return {"subject": subject, "body": body, "sent": True, "message_id": msg_id}
 
 
 # ── Gmail OAuth ───────────────────────────────────────────────────────────────
@@ -178,11 +161,15 @@ async def oauth_callback(code: str, state: str):
     try:
         tid, email = await gmail_service.complete_oauth(code, state)
         return HTMLResponse(
-            f"<h2>✅ Gmail connected!</h2><p>Account: {email}</p>"
+            f"<h2>✅ Gmail connected!</h2><p>Account: <b>{email}</b></p>"
             "<p>You can close this tab and return to Telegram.</p>"
         )
     except Exception as e:
-        return HTMLResponse(f"<h2>❌ Failed</h2><p>{e}</p><p>Please try again from Telegram.</p>", status_code=400)
+        return HTMLResponse(
+            f"<h2>❌ Connection failed</h2><p>{e}</p>"
+            "<p>Please try again from Telegram.</p>",
+            status_code=400,
+        )
 
 
 # ── Interview ─────────────────────────────────────────────────────────────────
@@ -195,14 +182,11 @@ class InterviewPrepRequest(BaseModel):
 
 @app.post("/interview/prepare")
 async def interview_prepare(req: InterviewPrepRequest):
-    try:
-        text = await llm_tasks.interview_prep(req.role, req.company, req.focus_areas)
-        return {"text": text}
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    text = await llm_tasks.interview_prep(req.role, req.company, req.focus_areas)
+    return {"text": text}
 
 
-# ── Applications (Excel tracker) ──────────────────────────────────────────────
+# ── Applications ──────────────────────────────────────────────────────────────
 
 class AppAddRequest(BaseModel):
     telegram_id: int
@@ -248,5 +232,8 @@ async def export_excel(telegram_id: int):
     from app.services.excel_tracker import get_workbook_path
     from fastapi.responses import FileResponse
     path = get_workbook_path(telegram_id)
-    return FileResponse(path, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        filename="job_applications.xlsx")
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename="job_applications.xlsx",
+    )
