@@ -46,5 +46,10 @@ class Settings(BaseSettings):
     followup_reminder_days: int = 3      # remind N days after applying
     job_search_cache_hours: int = 6
 
+    # ── Puter Bridge (free Claude, no API key) ───────────────────────────────
+    puter_auth_token: str = ""
+    puter_bridge_port: int = 3456
+    puter_model: str = "anthropic/claude-sonnet-4-5"
+
 
 settings = Settings()
