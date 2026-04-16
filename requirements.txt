@@ -15,3 +15,4 @@ pdfminer.six==20221105
 openpyxl==3.1.2
 apscheduler==3.10.4
 anthropic==0.40.0beautifulsoup4==4.12.3
+foreman==0.9.0
