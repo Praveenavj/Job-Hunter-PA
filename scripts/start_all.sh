@@ -1,7 +1,8 @@
 #!/bin/bash
 # ============================================================
-#  Job Hunter PA – Full Startup Script
+#  Job Hunter PA — Start Everything
 #  Starts: Puter Bridge → FastAPI Backend → Telegram Bot
+#
 #  Usage: bash scripts/start_all.sh
 # ============================================================
 set -e
@@ -9,115 +10,78 @@ set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# ── Colour helpers ───────────────────────────────────────────
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-BLUE='\033[0;34m'
-NC='\033[0m'  # No Color
-
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; BLUE='\033[0;34m'; NC='\033[0m'
 info()  { echo -e "${YELLOW}▶ $1${NC}"; }
 ok()    { echo -e "${GREEN}✅ $1${NC}"; }
 error() { echo -e "${RED}❌ $1${NC}"; }
-step()  { echo -e "\n${BLUE}━━━ $1 ━━━${NC}\n"; }
+blue()  { echo -e "${BLUE}ℹ  $1${NC}"; }
 
-# ── Cleanup trap ─────────────────────────────────────────────
-cleanup() {
-  echo ""
-  info "Shutting down..."
-  
-  # Kill bridge if running
-  if [ -n "$BRIDGE_PID" ] && kill -0 "$BRIDGE_PID" 2>/dev/null; then
-    kill "$BRIDGE_PID" 2>/dev/null && ok "Puter Bridge stopped" || true
-  fi
-  
-  # Kill backend if running
-  if [ -n "$BACKEND_PID" ] && kill -0 "$BACKEND_PID" 2>/dev/null; then
-    kill "$BACKEND_PID" 2>/dev/null && ok "Backend stopped" || true
-  fi
-  
-  exit 0
-}
-trap cleanup SIGINT SIGTERM
-
-# ── Header ───────────────────────────────────────────────────
 echo ""
-echo "═══════════════════════════════════════════"
-echo "  🤖 Job Hunter PA – Starting Up"
-echo "═══════════════════════════════════════════"
+echo "═══════════════════════════════════════════════════"
+echo "  Job Hunter PA v4.0 — Starting up"
+echo "═══════════════════════════════════════════════════"
 echo ""
 
-# ── Prerequisites ────────────────────────────────────────────
-step "Checking prerequisites"
-
+# ── Checks ────────────────────────────────────────────────────────────────────
 if [ ! -f .env ]; then
   error ".env file not found"
-  echo "  → Run: cp .env.example .env  then fill in your values"
+  echo "  Run: cp .env.example .env  then fill in your values"
   exit 1
 fi
 
 if ! command -v uvicorn &>/dev/null; then
-  error "uvicorn not found"
-  echo "  → Run: pip install -r requirements.txt"
+  error "uvicorn not found — run: source .venv/bin/activate && pip install -r requirements.txt"
   exit 1
 fi
 
-if ! command -v node &>/dev/null; then
-  error "Node.js not found (required for Puter Bridge)"
-  echo "  → Install: brew install node  (macOS) or visit nodejs.org"
-  exit 1
-fi
+# ── Kill any lingering processes from previous runs ───────────────────────────
+info "Cleaning up any lingering processes on ports 3456 and 8000..."
+lsof -ti:3456 | xargs kill -9 2>/dev/null || true
+lsof -ti:8000 | xargs kill -9 2>/dev/null || true
+sleep 1
 
-# Load environment variables for shell commands
-set -a && source .env && set +a
+# ── Step 1: Start Puter Bridge (Node.js) ─────────────────────────────────────
+PUTER_TOKEN=$(grep -E "^PUTER_AUTH_TOKEN=" .env 2>/dev/null | cut -d= -f2 | tr -d '"' | tr -d "'" || echo "")
 
-# ── Step 1: Start Puter Bridge ───────────────────────────────
-step "Starting Puter Bridge (free Claude access)"
-
-# Check if bridge is already running
-if curl -sf http://localhost:3456/health > /dev/null 2>&1; then
-  ok "Puter Bridge already running on port 3456"
-else
-  info "Launching Puter Bridge..."
-  
-  # Start bridge in background
+if [ -z "$PUTER_TOKEN" ]; then
+  echo ""
+  echo -e "${YELLOW}⚠️  PUTER_AUTH_TOKEN not set in .env${NC}"
+  echo "   The bot will fall back to ANTHROPIC_API_KEY instead."
+  echo "   To get FREE Claude access via Puter:"
+  echo "   1. Go to https://puter.com → Sign up (free)"
+  echo "   2. Open DevTools → Console → run:"
+  echo "      puter.auth.getToken().then(t => console.log(t))"
+  echo "   3. Copy the token → add to .env: PUTER_AUTH_TOKEN=your_token"
+  echo ""
+elif command -v node &>/dev/null && [ -f puter_bridge/server.js ]; then
+  info "Starting Puter Bridge (free Claude API)..."
   node puter_bridge/server.js &
   BRIDGE_PID=$!
   echo "  Bridge PID: $BRIDGE_PID"
-  
-  # Wait for bridge to be ready (max 15s)
-  info "Waiting for bridge to initialize..."
-  BRIDGE_READY=false
-  for i in $(seq 1 15); do
-    if curl -sf http://localhost:3456/health | grep -q '"token_set":true'; then
-      BRIDGE_READY=true
+
+  # Wait up to 5 seconds for bridge to be ready
+  for i in $(seq 1 10); do
+    if curl -sf http://localhost:3456/health > /dev/null 2>&1; then
+      ok "Puter Bridge is ready → http://localhost:3456"
       break
     fi
-    sleep 1
-    echo -n "."
+    sleep 0.5
   done
-  echo ""
-  
-  if [ "$BRIDGE_READY" = false ]; then
-    error "Puter Bridge failed to start within 15 seconds"
-    echo "  → Check: node puter_bridge/server.js (run manually for errors)"
-    echo "  → Verify: PUTER_AUTH_TOKEN is set and valid in .env"
-    # Continue anyway — llm_client.py will fallback to Anthropic/Ollama
-  else
-    ok "Puter Bridge ready at http://localhost:3456"
-    
-    # Show token status (sanitized)
-    TOKEN_LEN=${#PUTER_AUTH_TOKEN}
-    if [ "$TOKEN_LEN" -gt 40 ]; then
-      echo "  🔑 Token: ✅ Loaded (${TOKEN_LEN} chars)"
-    fi
+  if ! curl -sf http://localhost:3456/health > /dev/null 2>&1; then
+    echo -e "${YELLOW}⚠️  Puter Bridge didn't respond — continuing without it${NC}"
+    BRIDGE_PID=""
   fi
+else
+  if ! command -v node &>/dev/null; then
+    echo -e "${YELLOW}⚠️  Node.js not found — skipping Puter Bridge${NC}"
+    echo "   Install Node.js: https://nodejs.org"
+  fi
+  BRIDGE_PID=""
 fi
 
-# ── Step 2: Start FastAPI Backend ────────────────────────────
-step "Starting FastAPI backend"
+# ── Step 2: Start FastAPI backend ─────────────────────────────────────────────
+info "Starting FastAPI backend on port 8000..."
 
-info "Launching uvicorn on port 8000..."
 uvicorn app.main:app \
   --host 0.0.0.0 \
   --port 8000 \
@@ -126,18 +90,17 @@ uvicorn app.main:app \
   --reload-exclude '__pycache__' \
   --reload-exclude 'data' \
   --reload-exclude '*.db' \
-  --reload-exclude '*.xlsx' \
-  --reload-exclude 'puter_bridge' &
+  --reload-exclude '*.xlsx' &
 
 BACKEND_PID=$!
 echo "  Backend PID: $BACKEND_PID"
 
-# Wait for backend health check
-info "Waiting for backend to respond..."
-BACKEND_READY=false
+# Wait for backend (up to 20s)
+info "Waiting for backend..."
+READY=false
 for i in $(seq 1 20); do
   if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
-    BACKEND_READY=true
+    READY=true
     break
   fi
   sleep 1
@@ -145,27 +108,39 @@ for i in $(seq 1 20); do
 done
 echo ""
 
-if [ "$BACKEND_READY" = false ]; then
-  error "Backend failed to start within 20 seconds"
-  cleanup
+if [ "$READY" = false ]; then
+  error "Backend did not start within 20 seconds"
+  kill $BACKEND_PID 2>/dev/null || true
+  [ -n "$BRIDGE_PID" ] && kill $BRIDGE_PID 2>/dev/null || true
   exit 1
 fi
 
-ok "Backend ready at http://localhost:8000"
-echo "  📚 API docs: http://localhost:8000/docs"
-echo "  🔍 Health:   http://localhost:8000/health"
-
-# ── Step 3: Start Telegram Bot ───────────────────────────────
-step "Starting Telegram bot"
-
-echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${GREEN}  🚀 All systems go! Bot is listening...${NC}"
-echo -e "${GREEN}  Press Ctrl+C to stop everything${NC}"
-echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+ok "Backend is ready → http://localhost:8000"
+blue "API docs: http://localhost:8000/docs"
 echo ""
 
-# Run bot in foreground so Ctrl+C triggers cleanup trap
+# ── Summary ───────────────────────────────────────────────────────────────────
+echo "═══════════════════════════════════════════════════"
+echo "  Services running:"
+[ -n "$BRIDGE_PID" ] && echo -e "  ${GREEN}✅ Puter Bridge${NC}  → http://localhost:3456  (FREE Claude)"
+echo -e "  ${GREEN}✅ FastAPI backend${NC} → http://localhost:8000"
+echo ""
+echo "  Starting Telegram bot now..."
+echo "  Press Ctrl+C to stop everything."
+echo "═══════════════════════════════════════════════════"
+echo ""
+
+# ── Cleanup on exit ───────────────────────────────────────────────────────────
+cleanup() {
+  echo ""
+  info "Shutting down..."
+  kill $BACKEND_PID 2>/dev/null && ok "Backend stopped" || true
+  [ -n "$BRIDGE_PID" ] && (kill $BRIDGE_PID 2>/dev/null && ok "Puter Bridge stopped" || true)
+  exit 0
+}
+trap cleanup INT TERM
+
+# ── Step 3: Start Telegram bot (foreground — Ctrl+C stops everything) ─────────
 python -m bot.telegram_bot
 
-# ── Cleanup (only reached if bot exits normally) ─────────────
 cleanup
