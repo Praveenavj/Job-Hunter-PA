@@ -1,22 +1,25 @@
-# Dockerfile
+# Dockerfile - optimized version
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system deps
-RUN apt-get update && apt-get install -y \
+# Install only essential system deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    git \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
-# Install Python deps
+# Copy requirements first (better caching)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
-# Copy app code
+# Copy app code last (changes more often)
 COPY . .
 
-# Expose port for backend
+# Expose port
 EXPOSE 8000
 
-# Run backend + bot (bot runs in background)
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port $PORT & sleep 5 && python -m bot.telegram_bot"]
+# Run backend + bot
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} & sleep 5 && python -m bot.telegram_bot"]
