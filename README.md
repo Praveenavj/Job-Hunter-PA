@@ -1,121 +1,175 @@
-# Job Hunter Personal Assistant (Telegram Bot + Backend)
+# Job Hunter Personal Assistant (Telegram Bot + FastAPI)
 
-This project provides a Telegram-based personal assistant for job hunting with these services:
+AI-powered Telegram assistant for job search, resume tailoring, outreach emails, interview prep, application tracking, daily digests, and reminders.
 
-1. See jobs available
-2. Revise resume
-3. Draft email
-4. Track job on Notion
-5. Prepare for interviews
+## Current architecture (v3)
 
-## Tools and APIs used
+- **Backend:** FastAPI (`app/main.py`)
+- **Bot:** aiogram 3 (`bot/telegram_bot.py`)
+- **Database:** SQLite (`data/job_hunter.db`)
+- **LLM cascade (in order):**
+  1. **Puter Bridge** (free Claude via `puter_bridge/server.js`)
+  2. **Anthropic API** (paid)
+  3. **Ollama** (local fallback)
 
-- **FastAPI** — backend API server
-- **aiogram** — Telegram bot framework
-- **OpenClaw-compatible Chat Completions API** — LLM responses for resume, email, and interview help
-- **Notion API** — job application tracking
-- **Gmail API** — optional outreach sending after user OAuth approval
-- **Google OAuth 2.0** — user Gmail connection flow
-- **Remotive API** — remote job search source
-- **Jobicy API** — Singapore and remote job search source
-- **Adzuna API** — Singapore job search source
+---
 
-## Project Structure
+## Quick start (latest recommended way)
 
-- `app/main.py` — FastAPI endpoints
-- `app/services/openclaw_client.py` — OpenClaw API integration
-- `app/services/job_service.py` — job search integration (Remotive, Jobicy, Adzuna)
-- `app/services/notion_service.py` — Notion tracking
-- `app/services/gmail_oauth_service.py` — Gmail OAuth connect/disconnect/status
-- `app/services/gmail_service.py` — Gmail API sending
-- `bot/telegram_bot.py` — Telegram bot commands and messaging
-
-## 1) Setup
+### 1) Install dependencies
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python3 -m pip install -r requirements.txt
-cp .env.example .env
+python -m pip install -r requirements.txt
 ```
 
-Update `.env` with your values:
-
-- `TELEGRAM_BOT_TOKEN`
-- `BACKEND_BASE_URL` (default: `http://localhost:8000`)
-- `OPENCLAW_API_URL` (OpenClaw endpoint)
-- `OPENCLAW_API_KEY` (if needed)
-- `OPENCLAW_MODEL`
-- `ADZUNA_APP_ID` and `ADZUNA_APP_KEY` (for Singapore jobs)
-- `NOTION_API_KEY` and `NOTION_DATABASE_ID` (for `/track`)
-- `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET` (for Gmail OAuth)
-- `OAUTH_REDIRECT_URL` (must match Google Cloud OAuth redirect URI)
-- `APP_SECRET_KEY` (used to sign OAuth state and encrypt refresh tokens)
-- `SQLITE_DB_PATH` (default `./data/job_hunter.db`)
-
-## 2) Run backend
+If you plan to use **Puter Bridge**, also install Node deps once:
 
 ```bash
-python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+cd puter_bridge
+npm install
+cd ..
 ```
 
-## 3) Run Telegram bot
+### 2) Create/update `.env`
 
-Open a second terminal:
+Create `.env` in project root (same level as `README.md`).
+
+Minimum required:
+
+```env
+TELEGRAM_BOT_TOKEN=...
+BACKEND_BASE_URL=http://localhost:8000
+```
+
+LLM options (use at least one):
+
+```env
+# Option A (recommended free)
+PUTER_AUTH_TOKEN=...
+PUTER_BRIDGE_URL=http://localhost:3456
+PUTER_MODEL=claude-sonnet-4-5
+
+# Option B (paid Claude API)
+ANTHROPIC_API_KEY=...
+ANTHROPIC_MODEL=claude-sonnet-4-5
+
+# Option C (local)
+OLLAMA_API_URL=http://localhost:11434/v1/chat/completions
+OLLAMA_MODEL=mistral
+```
+
+Optional integrations:
+
+```env
+# Job sources
+ADZUNA_APP_ID=...
+ADZUNA_APP_KEY=...
+
+# Gmail OAuth (for /outreach send-now)
+GMAIL_CLIENT_ID=...
+GMAIL_CLIENT_SECRET=...
+OAUTH_REDIRECT_URL=http://localhost:8000/oauth/gmail/callback
+
+# App security + storage
+APP_SECRET_KEY=change-me
+SQLITE_DB_PATH=./data/job_hunter.db
+
+# Scheduler trigger protection
+CRON_SECRET=change-this-secret
+```
+
+### 3) Start backend + bot together
 
 ```bash
-python3 -m bot.telegram_bot
+bash scripts/start_all.sh
 ```
 
-## Telegram Commands
+This script:
 
-- `/jobs <role> | <location> | <limit>`
-- `/resume <target_role> || <resume_text> || <skill1,skill2>`
-- `/email <purpose> || <recipient_name> || <context> || <tone>`
-- `/outreach <to_email> || <recipient_name> || <role> || <company> || <resume_text> || <tone> || <send_now:true|false>`
-- `/gmail_connect`
-- `/gmail_status`
-- `/gmail_disconnect`
-- `/track <company> || <role> || <status> || <link> || <notes>`
-- `/interview <role> || <company> || <focus1,focus2>`
-- `/help`
+- checks `.env`
+- starts FastAPI on port `8000`
+- waits for `/health`
+- starts Telegram bot in foreground
 
-## Bot UI
+---
 
-The bot now shows a menu-style keyboard:
+## Optional: start Puter Bridge (for free Claude)
 
-1. See jobs available
-2. Revise resume
-3. Draft email
-4. Track job on Notion
-5. Prepare for interviews
+Open another terminal:
 
-Option 3 uses an LLM to generate outreach emails and can optionally send them via Gmail API.
+```bash
+node puter_bridge/server.js
+```
 
-## Job search sources
+Health check:
 
-- **Remote jobs**: Remotive
-- **Singapore jobs**: Adzuna first, then Jobicy as fallback
-- Search results show the source label and clickable buttons in Telegram
+- `http://localhost:3456/health`
 
-## Multi-user Gmail OAuth flow (recommended)
+---
 
-1. User runs `/gmail_connect` in Telegram.
-2. Bot sends an OAuth link from backend endpoint `/gmail/connect-link`.
-3. User authorizes Google access in browser.
-4. Google redirects to `/oauth/gmail/callback`.
-5. Backend stores user refresh token encrypted in SQLite.
-6. User runs `/outreach ... || true` to send from their own Gmail.
+## Other run modes
 
-This avoids collecting user credentials in Telegram messages.
+### Bot only (when backend is already running remotely)
 
-## Notes
+```bash
+bash scripts/run_bot.sh
+```
 
-- OpenClaw integration expects OpenAI-style `chat/completions` response shape.
-- If your OpenClaw deployment uses a different schema, adjust `app/services/openclaw_client.py` accordingly.
-- Notion database should contain properties with names:
-  - `Company` (title)
-  - `Role` (rich_text)
-  - `Status` (select)
-  - `Link` (url, optional)
-  - `Notes` (rich_text, optional)
+### Manual mode (2 terminals)
+
+Terminal 1:
+
+```bash
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Terminal 2:
+
+```bash
+python -m bot.telegram_bot
+```
+
+---
+
+## Verify services
+
+- Backend health: `http://localhost:8000/health`
+- API docs: `http://localhost:8000/docs`
+- Bridge health (if used): `http://localhost:3456/health`
+
+---
+
+## Main bot commands
+
+- `/jobs` — search jobs (multi-source)
+- `/digest` — save daily search (9 AM digest)
+- `/resume` — upload/revise resume
+- `/tailor` — tailor to specific job description
+- `/email` — draft email
+- `/outreach` — outreach draft + optional Gmail send
+- `/gmail_connect`, `/gmail_status`, `/gmail_disconnect`
+- `/track`, `/myapps`, `/update`, `/export`
+- `/interview`, `/practice`
+- `/addstar`, `/mystars`
+- `/remindme`, `/myreminders`, `/testalert`
+- `/status`, `/stop`, `/help`
+
+---
+
+## Test suite
+
+```bash
+bash scripts/test_all.sh
+```
+
+---
+
+## Deployment notes
+
+- `Dockerfile.combined` builds Python + Node runtime.
+- `railway.json` is configured to deploy from that Dockerfile.
+- `Procfile` includes process definitions for bridge/backend/bot.
+
+For Railway single-service backend deployment, ensure your environment variables are set in Railway and `/health` is reachable.
