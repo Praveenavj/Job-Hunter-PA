@@ -1,6 +1,4 @@
- source /Users/praveenavj/Downloads/jobhunter-pa/.venv/bin/activate
-
- # Use Python base image
+# Use Python base image
 FROM python:3.11-slim
 
 # Install Node.js
