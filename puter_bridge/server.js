@@ -33,7 +33,7 @@ require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') }
 const http  = require('http');
 const https = require('https');
 
-const PORT        = parseInt(process.env.PUTER_BRIDGE_PORT || '3456');
+const PORT = parseInt(process.env.PORT || process.env.PUTER_BRIDGE_PORT || '3456');
 const PUTER_TOKEN = process.env.PUTER_AUTH_TOKEN || '';
 const MODEL       = process.env.PUTER_MODEL || 'claude-sonnet-4-5';
 
